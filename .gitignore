@@ -1,0 +1,26 @@
+# 依赖
+node_modules/
+
+# ---- 不入库：内部工作文档（含个人信息与内部路径） ----
+工作文档.md
+交接文档.md
+
+# ---- 不入库：第三方产物与本地探针 ----
+# ref/ 是 B站 自家的压缩 bundle，只做本地取证，不转发
+ref/
+# baseline/ 是 GreasyFork 旧版 1.0.41，仓库只保留当前源码
+baseline/
+# tools/ 是本机探针脚本，写死了本机绝对路径
+tools/
+
+# 系统垃圾
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
+
+# 本地测试页（依赖本机 dist 相对路径，且带真实直播间号）
+tests/site/

@@ -1,0 +1,1279 @@
+/* ===== 本脚本自有 UI =====
+   2026-11-18 按 Master 圈定重做：跟 B站 主色走、整块浮层偏粉（直播氛围，半透明玻璃，允许轻微发光），
+   展开/收起 200–250ms，尊重 prefers-reduced-motion。
+   约定：正文不铺粉（看直播看久了刺眼）——粉只出现在「玻璃底的粉调 / 强调色 / 轻微粉光 / 语义点」。
+   字号只留 11 / 12 / 13 三档，字重只留 400 / 500 / 600；间距走 4px 格；圆角 8(控件) / 14(浮层)。 */
+
+#bf-panel,
+#bf-rec,
+#bf-card,
+#bf-orb,
+#bf-toast,
+#bf-pin {
+  --bf-bg: rgba(26, 18, 24, 0.88);
+  --bf-bg2: rgba(38, 26, 34, 0.94);
+  --bf-s2: rgba(255, 235, 243, 0.06);
+  --bf-s3: rgba(255, 235, 243, 0.11);
+  --bf-border: rgba(255, 200, 220, 0.13);
+  --bf-border2: rgba(255, 200, 220, 0.22);
+  --bf-text: #f3ecef;
+  --bf-muted: #a797a1;
+  --bf-accent: #fb7299;
+  --bf-accent-ink: #2b0d18;
+  --bf-pink: #fb7299;
+  --bf-fan: #ffd166;
+  --bf-custom: #0011ff;
+  --bf-danger: #ff5c5c;
+  --bf-radius: 14px;
+  --bf-ctl: 8px;
+  --bf-ease: cubic-bezier(0.22, 0.8, 0.3, 1);
+  --bf-dur: 0.22s;
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  color: var(--bf-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+#bf-panel[data-bftheme="light"],
+#bf-rec[data-bftheme="light"],
+#bf-card[data-bftheme="light"],
+#bf-pin[data-bftheme="light"] {
+  --bf-bg: rgba(255, 249, 251, 0.94);
+  --bf-bg2: #ffffff;
+  --bf-s2: rgba(70, 20, 40, 0.05);
+  --bf-s3: rgba(70, 20, 40, 0.10);
+  --bf-border: rgba(70, 20, 40, 0.12);
+  --bf-border2: rgba(70, 20, 40, 0.20);
+  --bf-text: #2a1a21;
+  --bf-muted: #7b6a72;
+  --bf-accent: #e2597f;
+  --bf-accent-ink: #ffffff;
+  --bf-pink: #d83b78;
+  --bf-fan: #a97100;
+  --bf-custom: #2438e8;
+}
+
+/* ---------- 画面弹幕上的昵称 ---------- */
+/* 左沿渐隐：弹幕滚出画面时昵称先出界，只剩半截正文贴着容器边缘排成一列，很脏。
+   用 mask 让最后 7% 逐渐透明，观感上是「淡出」而不是「被切断」。 */
+.danmaku-item-container {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 7%);
+  mask-image: linear-gradient(to right, transparent 0, #000 7%);
+}
+
+/* 昵称字号/宽度由 35-decorate.js 的 fitAllNicks 逐帧决定（放不下先缩字、再截断、最后才藏）。 */
+.bf-nick {
+  white-space: nowrap !important;
+  margin-right: 0.25em !important;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 600;
+  display: inline;
+}
+.bf-nick .bf-b {
+  font-style: normal;
+  margin-right: 0.14em;
+  opacity: 0.95;
+}
+.bf-nick .bf-n {
+  font-weight: 600;
+}
+/* 长昵称（超过 8 字）打的标记：字号由 JS 决定，这里只把亮度压一点，长名字不那么抢正文 */
+.bf-nick.bf-small {
+  opacity: 0.88;
+}
+/* 纯表情弹幕：**不动容器尺寸**（撑开会把表情图放大成巨图），只放开裁剪，
+   把昵称绝对定位到容器左侧外溢出去。 */
+.bili-danmaku-x-dm.bf-emoji-open,
+[class*="bili-danmaku-x-dm"].bf-emoji-open {
+  overflow: visible !important;
+}
+/* 文字弹幕：昵称绝对定位在正文左侧（不占布局宽度，否则会吃掉 B站 给下一条留的 ~70px 间隔）。 */
+.bili-danmaku-x-dm.bf-nick-open,
+[class*="bili-danmaku-x-dm"].bf-nick-open {
+  overflow: visible !important;
+}
+.bili-danmaku-x-dm.bf-emoji-open > .bf-nick,
+[class*="bili-danmaku-x-dm"].bf-emoji-open > .bf-nick {
+  position: absolute !important;
+  right: 100% !important;
+  left: auto !important;
+  top: 50% !important;
+  transform: translateY(-50%) !important;
+  margin: 0 4px 0 0 !important;
+  display: block !important;
+  width: max-content !important;
+}
+.bili-danmaku-x-dm.bf-emoji-open > img,
+[class*="bili-danmaku-x-dm"].bf-emoji-open > img {
+  max-width: 100% !important;
+  max-height: 100% !important;
+}
+.bili-danmaku-x-dm.bf-hit,
+[class*="bili-danmaku-x-dm"].bf-hit {
+  pointer-events: auto !important;
+}
+
+/* ---------- 悬停冻结层 ----------
+   悬停时把那条弹幕「钉」在这里。B站 的弹幕元素是池化复用的，它按自己的计时器
+   回收并复用元素；只有把我们自己的一份 fixed 浮层留住，卡片才不会被连带消失。
+   配色不跟页面主题走：它贴在视频画面上，用深色半透明底 + 浅色字，
+   看起来就是「这条弹幕自己停住了」，而不是压了一块白板。 */
+#bf-pin {
+  position: fixed;
+  z-index: 2147482998;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  margin: 0;
+  border-radius: 8px;
+  background: rgba(16, 11, 15, 0.78);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: calc(100vw - 16px);
+  overflow: visible;
+  font-size: 12px;
+  line-height: 1.35;
+  animation: bf-pin-in 0.14s var(--bf-ease);
+}
+#bf-pin .bf-pin-nick,
+#bf-pin .bf-pin-text {
+  display: inline;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.35;
+  vertical-align: baseline;
+  color: #fff;
+}
+#bf-pin .bf-pin-nick {
+  margin-right: 4px;
+  font-weight: 600;
+}
+#bf-pin .bf-pin-text {
+  font-weight: 400;
+}
+@keyframes bf-pin-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ---------- 悬浮球 ---------- */
+#bf-orb {
+  position: fixed;
+  z-index: 2147483000;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  padding: 0;
+  background: var(--bf-accent);
+  color: var(--bf-accent-ink);
+  box-shadow: 0 8px 20px rgba(251, 114, 153, 0.32);
+  cursor: pointer;
+  touch-action: none;
+  transition: box-shadow var(--bf-dur) var(--bf-ease), transform 0.12s var(--bf-ease);
+}
+#bf-orb svg {
+  width: 21px;
+  height: 21px;
+}
+#bf-orb:hover {
+  box-shadow: 0 8px 26px rgba(251, 114, 153, 0.48);
+}
+#bf-orb:active {
+  transform: scale(0.97);
+}
+
+/* ---------- 设置面板 ---------- */
+#bf-panel {
+  position: fixed;
+  z-index: 2147483001;
+  width: 320px;
+  max-width: calc(100vw - 12px);
+  max-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bf-bg);
+  border: 1px solid var(--bf-border);
+  border-radius: var(--bf-radius);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 200, 220, 0.04);
+  backdrop-filter: blur(16px) saturate(1.15);
+  overflow: hidden;
+  /* 关闭态：visibility + pointer-events 双保险。绝不靠 display 过渡收尾 ——
+     实测 allow-discrete 可能停在 display:flex/opacity:0，面板看不见却继续吞点击。 */
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.985);
+  transition:
+    opacity var(--bf-dur) var(--bf-ease),
+    transform var(--bf-dur) var(--bf-ease),
+    visibility var(--bf-dur) allow-discrete;
+}
+#bf-panel.bf-open {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: none;
+}
+#bf-panel,
+#bf-panel * {
+  box-sizing: border-box;
+}
+.bf-head {
+  height: 44px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 16px;
+  background: var(--bf-bg2);
+  border-bottom: 1px solid var(--bf-border);
+  cursor: move;
+}
+.bf-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.bf-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--bf-accent);
+  box-shadow: 0 0 8px rgba(251, 114, 153, 0.55);
+}
+.bf-dot.bf-pink {
+  background: var(--bf-pink);
+  box-shadow: 0 0 8px rgba(251, 114, 153, 0.55);
+}
+.bf-hright {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.bf-ver {
+  font-size: 11px;
+  color: var(--bf-muted);
+  font-variant-numeric: tabular-nums;
+}
+.bf-x {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--bf-ctl);
+  background: transparent;
+  color: var(--bf-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+.bf-x:hover {
+  background: var(--bf-s3);
+  color: var(--bf-text);
+}
+.bf-body {
+  padding: 8px 16px 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.bf-sec {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--bf-border);
+}
+.bf-sec:last-child {
+  border-bottom: 0;
+}
+.bf-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  margin: 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.bf-lab {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.bf-sub {
+  font-size: 11px;
+  color: var(--bf-muted);
+  font-weight: 400;
+}
+.bf-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.bf-in {
+  height: 32px;
+  width: 108px;
+  padding: 0 10px;
+  color: var(--bf-text);
+  background: var(--bf-s2);
+  border: 1px solid var(--bf-border2);
+  border-radius: var(--bf-ctl);
+  outline: none;
+  font-size: 12px;
+  font-family: inherit;
+  transition: border-color 0.16s var(--bf-ease);
+}
+.bf-in:focus {
+  border-color: var(--bf-accent);
+}
+.bf-in.bf-num {
+  width: 96px;
+  font-variant-numeric: tabular-nums;
+}
+.bf-in.bf-mini {
+  width: 48px;
+  text-align: center;
+}
+/* ---------- 分段按钮（API 查询范围这类二选一） ----------
+   原来用原生 <select>：展开弹层由系统绘制，深色下选中项是系统浅蓝、浅色下白字白底，
+   option:checked / appearance:base-select 全压不住（实测）。自绘弹层又会透出下层控件。
+   只有两个选项本来就不该用下拉 —— 改用分段按钮，没有弹层就没有这些问题。 */
+/* 标签在上、分段按钮占满整行：两个选项并排放在 320px 面板里，跟标签同行必然被裁 */
+.bf-row-sel {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 0 4px;
+  cursor: default;
+}
+.bf-seg {
+  display: flex;
+  width: 100%;
+  height: 32px;
+  padding: 2px;
+  gap: 2px;
+  background: var(--bf-s2);
+  border: 1px solid var(--bf-border2);
+  border-radius: var(--bf-ctl);
+}
+.bf-seg button {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--bf-muted);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);
+}
+.bf-seg button:hover {
+  color: var(--bf-text);
+  background: var(--bf-s3);
+}
+.bf-seg button[data-on="1"] {
+  background: var(--bf-accent);
+  color: var(--bf-accent-ink);
+  font-weight: 600;
+}
+.bf-seg button[data-on="1"]:hover {
+  background: var(--bf-accent);
+  color: var(--bf-accent-ink);
+}
+
+.bf-color {
+  width: 36px;
+  height: 28px;
+  padding: 2px;
+  background: var(--bf-s2);
+  border: 1px solid var(--bf-border2);
+  border-radius: var(--bf-ctl);
+  cursor: pointer;
+}
+.bf-field {
+  padding: 8px 0 4px;
+}
+.bf-ta {
+  width: 100%;
+  min-height: 64px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  resize: vertical;
+  color: var(--bf-text);
+  background: var(--bf-s2);
+  border: 1px solid var(--bf-border2);
+  border-radius: var(--bf-ctl);
+  outline: none;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: inherit;
+  transition: border-color 0.16s var(--bf-ease);
+}
+.bf-ta:focus {
+  border-color: var(--bf-accent);
+}
+.bf-sw {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  min-width: 36px;
+  cursor: pointer;
+}
+.bf-sw input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  margin: 0;
+  cursor: pointer;
+}
+.bf-track {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--bf-ctl);
+  background: var(--bf-s3);
+  transition: background var(--bf-dur) var(--bf-ease);
+}
+.bf-track::before {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 2px;
+  top: 2px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform var(--bf-dur) var(--bf-ease);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+.bf-sw input:checked + .bf-track {
+  background: var(--bf-accent);
+}
+.bf-sw input:checked + .bf-track::before {
+  transform: translateX(16px);
+}
+.bf-expand {
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--bf-muted);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.bf-expand:hover {
+  color: var(--bf-text);
+}
+.bf-more {
+  display: none;
+}
+.bf-more.bf-open {
+  display: block;
+}
+.bf-grp {
+  padding: 8px 0 4px;
+  border-top: 1px solid var(--bf-border);
+}
+.bf-gt {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--bf-accent);
+  margin: 0 0 8px;
+}
+.bf-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.bf-btn {
+  height: 30px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--bf-border2);
+  border-radius: var(--bf-ctl);
+  background: var(--bf-s2);
+  color: var(--bf-text);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 0.16s var(--bf-ease), background 0.16s var(--bf-ease);
+}
+.bf-btn:hover {
+  border-color: var(--bf-accent);
+}
+.bf-btn.bf-danger:hover {
+  border-color: var(--bf-danger);
+  color: var(--bf-danger);
+}
+.bf-status {
+  flex: 0 0 auto;
+  position: relative;
+  padding: 8px 26px 8px 16px;
+  border-top: 1px solid var(--bf-border);
+  background: var(--bf-bg2);
+  color: var(--bf-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.bf-stext {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 右下角缩放手柄：双层折角（外层大括号 + 内层小括号），一眼能认出是可拖拽缩放，
+   不用斜线（斜线在小尺寸下像渲染划痕，Master 2026-11-18 反馈过） */
+.bf-grip {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 15px;
+  height: 15px;
+  cursor: nwse-resize;
+  touch-action: none;
+  color: var(--bf-muted);
+  opacity: 0.85;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.bf-grip::before,
+.bf-grip::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  border-radius: 0 0 3px 0;
+}
+.bf-grip::before { width: 15px; height: 15px; }
+.bf-grip::after { width: 8px; height: 8px; }
+.bf-grip:hover { opacity: 1; color: var(--bf-accent); }
+
+/* ---------- 记录面板 ---------- */
+#bf-rec {
+  position: fixed;
+  z-index: 2147483001;
+  width: 460px;
+  max-width: calc(100vw - 12px);
+  max-height: 74vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bf-bg);
+  border: 1px solid var(--bf-border);
+  border-radius: var(--bf-radius);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 200, 220, 0.04);
+  backdrop-filter: blur(16px) saturate(1.15);
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.985);
+  transition:
+    opacity var(--bf-dur) var(--bf-ease),
+    transform var(--bf-dur) var(--bf-ease),
+    visibility var(--bf-dur) allow-discrete;
+}
+#bf-rec.bf-open {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+  transform: none;
+}
+#bf-rec,
+#bf-rec * {
+  box-sizing: border-box;
+}
+.bf-count {
+  font-size: 11px;
+  color: var(--bf-muted);
+  font-weight: 400;
+}
+.bf-count b {
+  color: var(--bf-text);
+  font-weight: 600;
+}
+.bf-rectool {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--bf-border);
+  flex: 0 0 auto;
+}
+.bf-filters {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.bf-rchip {
+  height: 28px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--bf-ctl);
+  border: 1px solid var(--bf-border2);
+  background: transparent;
+  color: var(--bf-muted);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  font-family: inherit;
+  transition: background 0.16s var(--bf-ease), border-color 0.16s var(--bf-ease), color 0.16s var(--bf-ease);
+}
+.bf-rchip[data-on="1"] {
+  color: var(--bf-text);
+  background: var(--bf-s2);
+  border-color: var(--bf-border);
+}
+.bf-rdot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.bf-rd-follow {
+  background: var(--bf-pink);
+}
+.bf-rd-fan {
+  background: var(--bf-fan);
+}
+.bf-rd-custom {
+  background: var(--bf-custom);
+}
+.bf-rd-kw {
+  background: var(--bf-danger);
+}
+.bf-sbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.bf-sf {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+.bf-sf input {
+  width: 100%;
+  height: 32px;
+  padding: 0 28px 0 10px;
+  background: var(--bf-s2);
+  border: 1px solid var(--bf-border2);
+  border-radius: var(--bf-ctl);
+  color: var(--bf-text);
+  outline: none;
+  font-size: 12px;
+  font-family: inherit;
+  transition: border-color 0.16s var(--bf-ease);
+}
+.bf-sf input:focus {
+  border-color: var(--bf-accent);
+}
+.bf-sf.bf-invalid input {
+  border-color: var(--bf-danger);
+}
+.bf-clearq {
+  position: absolute;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  display: none;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--bf-muted);
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.bf-sf.bf-has .bf-clearq {
+  display: grid;
+}
+.bf-rmode {
+  display: flex;
+  background: var(--bf-s2);
+  border: 1px solid var(--bf-border2);
+  border-radius: var(--bf-ctl);
+  overflow: hidden;
+  height: 32px;
+}
+.bf-rmode button {
+  height: 100%;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--bf-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);
+}
+.bf-rmode button[data-on="1"] {
+  background: var(--bf-accent);
+  color: var(--bf-accent-ink);
+  font-weight: 600;
+}
+.bf-toolrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  gap: 8px;
+}
+.bf-acts {
+  display: flex;
+  gap: 4px;
+}
+.bf-linkbtn {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--bf-muted);
+  cursor: pointer;
+  font-size: 11px;
+  border-radius: 6px;
+  font-family: inherit;
+  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);
+}
+.bf-linkbtn:hover {
+  background: var(--bf-s3);
+  color: var(--bf-text);
+}
+.bf-reclist {
+  flex: 1 1 auto;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 4px 6px 8px;
+}
+.bf-ritem {
+  position: relative;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--bf-border);
+}
+.bf-ritem:last-child {
+  border-bottom: 0;
+}
+.bf-ritem:hover {
+  background: var(--bf-s2);
+}
+.bf-rmeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--bf-muted);
+  margin-bottom: 4px;
+}
+.bf-rtime {
+  font-variant-numeric: tabular-nums;
+}
+.bf-rtag {
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+.bf-rt-follow {
+  color: var(--bf-pink);
+  background: rgba(251, 114, 153, 0.16);
+}
+.bf-rt-fan {
+  color: var(--bf-fan);
+  background: rgba(255, 209, 102, 0.16);
+}
+.bf-rt-custom {
+  color: #8b93ff;
+  background: rgba(0, 17, 255, 0.22);
+}
+.bf-rt-kw {
+  color: var(--bf-danger);
+  background: rgba(255, 92, 92, 0.16);
+}
+.bf-croomlink {
+  color: var(--bf-accent);
+  text-decoration: none;
+}
+.bf-rline {
+  font-size: 13px;
+  line-height: 1.55;
+  padding-right: 48px;
+}
+.bf-rname {
+  color: var(--bf-fan);
+  font-weight: 600;
+  text-decoration: none;
+}
+#bf-rec[data-bftheme="light"] .bf-rname {
+  color: #9a6306;
+}
+.bf-rroomtitle {
+  font-size: 11px;
+  color: var(--bf-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bf-ritem mark {
+  background: rgba(251, 114, 153, 0.28);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.bf-rcopy,
+.bf-rdel {
+  position: absolute;
+  top: 8px;
+  width: 26px;
+  height: 24px;
+  display: none;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: var(--bf-s2);
+  color: var(--bf-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+.bf-rcopy {
+  right: 4px;
+}
+.bf-rdel {
+  right: 32px;
+}
+.bf-ritem:hover .bf-rcopy,
+.bf-ritem:hover .bf-rdel {
+  display: grid;
+}
+.bf-rdel:hover {
+  color: var(--bf-danger);
+}
+.bf-rchk {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--bf-border2);
+  border-radius: 4px;
+  background: transparent;
+  color: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+}
+.bf-ritem.bf-rsel {
+  padding-left: 32px;
+}
+.bf-ritem.bf-rsel .bf-rchk {
+  display: flex;
+}
+.bf-rchk.bf-on {
+  background: var(--bf-accent);
+  border-color: var(--bf-accent);
+  color: var(--bf-accent-ink);
+}
+.bf-selbar {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-top: 8px;
+  border-radius: var(--bf-ctl);
+  background: var(--bf-s2);
+}
+.bf-selbar.bf-show {
+  display: flex;
+}
+.bf-selbar .bf-count {
+  flex: 1;
+}
+.bf-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--bf-muted);
+  font-size: 12px;
+  line-height: 1.8;
+}
+.bf-empty span {
+  font-size: 11px;
+}
+
+/* ---------- 身份卡 ---------- */
+#bf-card {
+  position: fixed;
+  z-index: 2147483002;
+  width: 280px;
+  display: block;
+  background: var(--bf-bg);
+  border: 1px solid var(--bf-border);
+  border-radius: var(--bf-radius);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 200, 220, 0.05);
+  backdrop-filter: blur(16px) saturate(1.15);
+  overflow: hidden;
+  pointer-events: auto;
+  visibility: hidden;
+  opacity: 0;
+  transform: scale(0.97);
+  transition:
+    opacity 0.2s var(--bf-ease),
+    transform 0.2s var(--bf-ease),
+    visibility 0.2s allow-discrete;
+}
+#bf-card.bf-open {
+  visibility: visible;
+  opacity: 1;
+  transform: none;
+}
+.bf-cbody {
+  padding: 12px 14px 10px;
+  font-size: 12px;
+}
+.bf-chead {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.bf-cface {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: var(--bf-s3);
+}
+.bf-cface-ph {
+  background: var(--bf-s3);
+}
+.bf-cwho {
+  min-width: 0;
+  flex: 1;
+}
+.bf-cname {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bf-cuid {
+  font-size: 11px;
+  color: var(--bf-muted);
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.bf-cverify {
+  color: var(--bf-fan);
+  border: 1px solid rgba(255, 209, 102, 0.4);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+.bf-cbadge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  flex: 0 0 auto;
+}
+.bf-cguard {
+  color: #ff9f43;
+  background: rgba(255, 159, 67, 0.16);
+}
+.bf-csign {
+  margin: 8px 0;
+  font-size: 11px;
+  color: var(--bf-muted);
+  line-height: 1.5;
+  max-height: 34px;
+  overflow: hidden;
+}
+.bf-cstats {
+  border-top: 1px solid var(--bf-border);
+  padding-top: 8px;
+}
+.bf-crow {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.9;
+}
+.bf-clabel {
+  color: var(--bf-muted);
+}
+.bf-cval {
+  font-variant-numeric: tabular-nums;
+}
+.bf-cmuted {
+  color: var(--bf-muted);
+}
+.bf-cvip {
+  color: var(--bf-pink);
+  font-size: 11px;
+}
+.bf-cfoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bf-border);
+}
+.bf-cmedal {
+  font-size: 11px;
+}
+.bf-clink {
+  font-size: 12px;
+  color: var(--bf-accent);
+  text-decoration: none;
+}
+.bf-clink:hover {
+  text-decoration: underline;
+}
+
+/* ---------- toast ---------- */
+#bf-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%) translateY(8px);
+  opacity: 0;
+  z-index: 2147483003;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: var(--bf-bg2);
+  border: 1px solid var(--bf-border2);
+  color: var(--bf-text);
+  font-size: 12px;
+  pointer-events: none;
+  transition: opacity var(--bf-dur) var(--bf-ease), transform var(--bf-dur) var(--bf-ease);
+  backdrop-filter: blur(12px);
+}
+#bf-toast.bf-show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+#bf-toast[data-kind="enter"] {
+  border-color: rgba(251, 114, 153, 0.5);
+}
+
+/* 拖拽期间整页不选字；标题栏本身也不该被选中 */
+.bf-dragging,
+.bf-dragging * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: grabbing !important;
+}
+.bf-head {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 滚动条：系统默认的浅色条在玻璃面板上同样割裂 */
+/* ---------- 滚动条 ----------
+   Chromium 156 实测：只要样式里出现 ::-webkit-scrollbar，就退回「传统滚动条」渲染，
+   Windows 会画出上下 ▲▼ 按钮；而 ::-webkit-scrollbar-button{display:none} 在这个版本
+   上不生效（A/B 强制染绿都没出现绿色像素）。标准属性 scrollbar-width/color 走的是现代细条，
+   但没法给 thumb 精确上色/加圆角。
+   结论：**原生滚动条整体隐藏，自己画一根指示条**（.bf-sbthumb），彻底不依赖 OS 渲染。 */
+#bf-panel .bf-body,
+#bf-rec .bf-reclist {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+#bf-panel .bf-body::-webkit-scrollbar,
+#bf-rec .bf-reclist::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+.bf-sbthumb {
+  position: absolute;
+  right: 4px;
+  width: 6px;
+  border-radius: 999px;
+  background: rgba(251, 114, 153, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s var(--bf-ease);
+  will-change: transform, height;
+}
+.bf-sbthumb.bf-sbthumb-on {
+  opacity: 1;
+}
+.bf-sbthumb.bf-sbthumb-fade {
+  opacity: 0.35;
+}
+#bf-panel[data-bftheme="light"] .bf-sbthumb,
+#bf-rec[data-bftheme="light"] .bf-sbthumb {
+  background: rgba(226, 89, 127, 0.5);
+}
+/* 文本框自己的滚动条也藏掉（内容少时几乎不出现） */
+.bf-ta {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(251, 114, 153, 0.45) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #bf-panel,
+  #bf-rec,
+  #bf-card,
+  #bf-toast,
+  #bf-orb,
+  .bf-track,
+  .bf-track::before,
+  .bf-in,
+  .bf-ta,
+  .bf-btn,
+  .bf-rchip,
+  .bf-rmode button,
+  .bf-linkbtn {
+    transition: none !important;
+  }
+}
+
+/* ---------- 自绘下拉 ----------
+   原生 <select> 的展开弹层由浏览器/系统绘制：深色主题下选中项是系统浅蓝、浅色主题下是白底，
+   option:checked 的 background 会被 UA 高亮盖掉（appearance:base-select 也压不住，实测）。
+   所以这一项改成 button + 挂在 body 上的 listbox，颜色全部走主题 token。 */
+.bf-row-sel {
+  align-items: flex-start;
+  padding: 4px 0;
+}
+.bf-dd {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-block;
+}
+.bf-dd-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 136px;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--bf-s2);
+  border: 1px solid var(--bf-border2);
+  border-radius: var(--bf-ctl);
+  color: var(--bf-text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.16s var(--bf-ease), background 0.16s var(--bf-ease);
+}
+.bf-dd-btn:hover {
+  background: var(--bf-s3);
+}
+.bf-dd.bf-open .bf-dd-btn,
+.bf-dd-btn:focus-visible {
+  border-color: var(--bf-accent);
+  outline: none;
+}
+.bf-dd-val {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bf-dd-caret {
+  flex: 0 0 auto;
+  color: var(--bf-muted);
+  transition: transform 0.18s var(--bf-ease);
+}
+.bf-dd.bf-open .bf-dd-caret {
+  transform: rotate(180deg);
+}
+/* 菜单挂在 body 上（面板 overflow:hidden 会把它裁掉），所以这里必须自带全部颜色 */
+.bf-dd-menu {
+  position: fixed;
+  z-index: 2147483004;
+  padding: 4px;
+  background: #241a21;
+  border: 1px solid rgba(255, 200, 220, 0.22);
+  border-radius: 10px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(16px) saturate(1.15);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: bf-dd-in 0.16s cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+@keyframes bf-dd-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+.bf-dd-menu .bf-dd-opt {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #f3ecef;
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.bf-dd-menu .bf-dd-opt:hover {
+  background: rgba(255, 235, 243, 0.12);
+}
+.bf-dd-menu .bf-dd-opt.bf-on {
+  background: #fb7299;
+  color: #2b0d18;
+  font-weight: 600;
+}
+body.bf-theme-light .bf-dd-menu {
+  background: #ffffff;
+  border-color: rgba(70, 20, 40, 0.18);
+  box-shadow: 0 16px 36px rgba(70, 20, 40, 0.18);
+}
+body.bf-theme-light .bf-dd-menu .bf-dd-opt {
+  color: #2a1a21;
+}
+body.bf-theme-light .bf-dd-menu .bf-dd-opt:hover {
+  background: rgba(70, 20, 40, 0.07);
+}
+body.bf-theme-light .bf-dd-menu .bf-dd-opt.bf-on {
+  background: #e2597f;
+  color: #ffffff;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bf-dd-menu {
+    animation: none;
+  }
+  .bf-dd-caret {
+    transition: none;
+  }
+}

@@ -1,0 +1,2 @@
+$procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*browser-use*' -or $_.CommandLine -like '*chromium*' -or $_.Name -eq 'chrome.exe' }
+$procs | Select-Object ProcessId, Name, @{n='cmd';e={ if ($_.CommandLine) { $_.CommandLine.Substring(0, [Math]::Min(110, $_.CommandLine.Length)) } else { '' } }} | Format-Table -AutoSize | Out-String -Width 260

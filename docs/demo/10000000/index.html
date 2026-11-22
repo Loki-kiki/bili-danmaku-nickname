@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>弹幕昵称标注 · 演示</title>
+<style>
+  /* 模拟 B站 直播间播放器区域，仅用于截图演示；所有昵称与房间信息均为虚构 */
+  html, body { margin: 0; height: 100%; background: #0d0d12; }
+  body { font-family: "Microsoft YaHei", sans-serif; overflow: hidden; }
+
+  #stage {
+    position: relative; width: 1280px; height: 720px; margin: 0 auto;
+    background:
+      radial-gradient(circle at 30% 25%, #2b3550 0%, transparent 55%),
+      radial-gradient(circle at 72% 70%, #3a2b46 0%, transparent 50%),
+      linear-gradient(160deg, #171b26 0%, #0e1016 100%);
+    overflow: hidden;
+  }
+  /* 假画面内容：一块柔和的场景，避免纯色显得像空壳 */
+  #stage::before {
+    content: ""; position: absolute; inset: 60px 40px 130px;
+    border-radius: 10px;
+    background:
+      radial-gradient(ellipse at 40% 40%, rgba(120,160,255,0.16), transparent 60%),
+      radial-gradient(ellipse at 70% 65%, rgba(255,140,200,0.13), transparent 55%),
+      #12151d;
+    box-shadow: inset 0 0 90px rgba(0,0,0,0.8);
+  }
+  #stage::after {
+    content: "演示画面"; position: absolute; left: 50%; top: 44%;
+    transform: translate(-50%, -50%);
+    color: rgba(255,255,255,0.035); font-size: 44px; letter-spacing: 12px; font-weight: 700;
+  }
+
+  .room-bar {
+    position: absolute; left: 40px; top: 16px; display: flex; align-items: center; gap: 10px;
+    color: #e8e8ee; font-size: 14px;
+  }
+  .room-bar .avatar {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: linear-gradient(135deg, #6ea8ff, #b06eff);
+  }
+  .room-bar .rname { font-weight: 700; }
+  .room-bar .rtag {
+    font-size: 11px; padding: 1px 6px; border-radius: 3px;
+    background: #fb7299; color: #fff;
+  }
+  .room-bar .rid { color: #7c8496; font-size: 12px; }
+
+  /* 弹幕容器：类名与真实 B站 一致，脚本靠它找容器 */
+  .danmaku-item-container {
+    position: absolute; inset: 60px 40px 130px; overflow: hidden; contain: paint;
+  }
+  .bili-danmaku-x-dm {
+    position: absolute; left: var(--left, 0px); top: var(--top, 10px); white-space: pre;
+    font-size: var(--fontSize, 25px); color: var(--color, #fff);
+    font-family: "Microsoft YaHei", sans-serif; font-weight: 700;
+    text-shadow: 1px 0 1px #000, 0 1px 1px #000, 0 -1px 1px #000, -1px 0 1px #000;
+    will-change: transform;
+  }
+  /* 固定弹幕（顶部/底部）在真机上是水平居中的 */
+  .bili-danmaku-x-dm.bili-danmaku-x-center {
+    left: 50%; transform: translateX(-50%);
+  }
+  .bili-danmaku-x-dm[data-pure-emoji] { width: 32px; height: 32px; overflow: hidden; }
+
+  .player-bar {
+    position: absolute; left: 40px; right: 40px; bottom: 46px; height: 3px;
+    background: rgba(255,255,255,0.14); border-radius: 2px;
+  }
+  .player-bar i { position: absolute; left: 0; top: 0; bottom: 0; width: 42%; background: #fb7299; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="room-bar">
+    <div class="avatar"></div>
+    <span class="rname">示例直播间</span>
+    <span class="rtag">直播中</span>
+    <span class="rid">演示用虚构数据</span>
+  </div>
+
+  <div class="danmaku-item-container" id="dmc"></div>
+
+  <div class="player-bar"><i></i></div>
+</div>
+
+<script>
+/* ---------- GM 垫片（演示页不装油猴，自己补最小实现） ---------- */
+window.__store = {};
+window.GM_getValue = (k, d) => (k in window.__store ? window.__store[k] : d);
+window.GM_setValue = (k, v) => { window.__store[k] = v; };
+window.GM_addStyle = (css) => { const s = document.createElement("style"); s.textContent = css; document.head.appendChild(s); };
+window.GM_registerMenuCommand = () => {};
+window.GM_setClipboard = () => {};
+
+/* 假接口：全部返回虚构数据 */
+window.GM_xmlhttpRequest = (o) => {
+  let payload = { code: -1 };
+  if (o.url.indexOf("getDanmuInfo") >= 0) payload = { code: 0, data: { token: "demo", host_list: [{ host: "demo", wss_port: 443 }] } };
+  else if (o.url.indexOf("room_init") >= 0) payload = { code: 0, data: { room_id: 10000000 } };
+  else if (o.url.indexOf("Room/get_info") >= 0) payload = { code: 0, data: { uid: 10000001, uname: "示例直播间", title: "演示" } };
+  else if (o.url.indexOf("relation/stat") >= 0) {
+    const uid = (o.url.match(/vmid=(\d+)/) || [])[1];
+    payload = { code: 0, data: { follower: uid === "2001" ? 1280000 : 860 } };
+  } else if (o.url.indexOf("x/relation") >= 0) {
+    payload = { code: 0, data: { attribute: o.url.indexOf("fid=2001") >= 0 ? 2 : 0 } };
+  } else if (o.url.indexOf("web-interface/card") >= 0) {
+    const mid = (o.url.match(/mid=(\d+)/) || [])[1] || "0";
+    payload = { code: 0, data: { card: { mid, name: "用户" + mid, face: "", fans: 860, friend: 12, sign: "", level_info: { current_level: 4 }, Official: { type: 0, desc: "" } }, following: false } };
+  } else if (o.url.indexOf("nav") >= 0) {
+    payload = { code: 0, data: { wbi_img: { img_url: "https://i0.hdslb.com/bfs/wbi/" + "a".repeat(32) + ".png", sub_url: "https://i0.hdslb.com/bfs/wbi/" + "b".repeat(32) + ".png" } } };
+  }
+  setTimeout(() => { o.onload && o.onload({ status: 200, responseText: JSON.stringify(payload) }); }, 3);
+};
+
+/* 假 WebSocket：演示页自己往里灌包，不连网 */
+window.WebSocket = class FakeSocket {
+  constructor(url) {
+    this.url = url; this.readyState = 0; this.binaryType = "arraybuffer";
+    window.__ws = this;
+    setTimeout(() => { this.readyState = 1; this.onopen && this.onopen(); }, 1);
+  }
+  send() {}
+  close() { this.readyState = 3; }
+};
+
+window.__feedJson = (obj) => {
+  const enc = new TextEncoder().encode(JSON.stringify(obj));
+  const buf = new ArrayBuffer(16 + enc.length);
+  const v = new DataView(buf);
+  v.setUint32(0, buf.byteLength); v.setUint16(4, 16); v.setUint16(6, 0);
+  v.setUint32(8, 5); v.setUint32(12, 1);
+  new Uint8Array(buf, 16).set(enc);
+  window.__ws && window.__ws.onmessage && window.__ws.onmessage({ data: buf });
+};
+
+window.__danmaku = (o) => ({
+  cmd: "DANMU_MSG",
+  dm_v2: "",
+  info: [
+    [0, 1, 25, 16777215, Date.now(), 0, 0, "x", 0, 0, 0, "", 0, "{}", "{}"],
+    o.text,
+    [Number(o.uid), o.name, o.admin ? 1 : 0, 0, 0, 10000, 1, ""],
+    o.medal ? [o.medal.level, o.medal.name, "主播", 10000000, o.medal.color || 0, "", 0, 0, 0, 0, 0, 0, 0] : [],
+    [o.level || 4, 0, 0, 0],
+    "", "", o.guard || 0,
+  ],
+});
+
+window.__addEl = (o) => {
+  const el = document.createElement("div");
+  el.className = "bili-danmaku-x-dm bili-danmaku-x-roll bili-danmaku-x-show";
+  el.style.setProperty("--fontSize", (o.fontSize || 25) + "px");
+  el.style.setProperty("--color", o.color || "#ffffff");
+  el.style.setProperty("--top", o.top + "px");
+  // 脚本把昵称绝对定位在正文左侧，正文左边必须留出空间，否则昵称被容器裁掉
+  el.style.setProperty("--left", (o.left == null ? 320 : o.left) + "px");
+  el.textContent = o.text;
+  document.getElementById("dmc").appendChild(el);
+  return el;
+};
+</script>
+
+<script src="../../../dist/bili-danmaku-nickname.user.js"></script>
+
+<script>
+/* ---------- 演示编排：先放元素，再灌对应的弹幕包，让脚本自己配对标注 ---------- */
+window.__demo = async function () {
+  const W = (ms) => new Promise((r) => setTimeout(r, ms));
+  await W(200);
+
+  // 悬浮球挪开并隐藏，别压住弹幕（演示图只展示标注效果）
+  const orb = document.getElementById("bf-orb");
+  if (orb) orb.style.setProperty("display", "none", "important");
+
+  const rows = [
+    { name: "路过的猫", text: "这段太顶了", top: 26, left: 330, uid: "3001", color: "#ffffff" },
+    { name: "提督·夜航星", text: "上舰支持了", top: 72, left: 400, uid: "2001", guard: 3, medal: { level: 24, name: "示例团", color: 13081892 }, color: "#ffe066" },
+    { name: "房管·小满", text: "注意弹幕礼仪哦", top: 118, left: 320, uid: "3002", admin: 1, color: "#8fd3ff" },
+    { name: "路人乙", text: "哈哈哈哈", top: 164, left: 470, uid: "3003", color: "#ffffff" },
+    { name: "关注很久的老粉", text: "从第一期看到现在", top: 210, left: 360, uid: "2002", medal: { level: 18, name: "示例团", color: 13081892 }, color: "#ffffff" },
+    { name: "新来的", text: "请问这是第几集", top: 256, left: 440, uid: "3004", color: "#ffffff" },
+    { name: "一二三四五六七八九十", text: "长昵称也不截断", top: 302, left: 350, uid: "3005", color: "#ffffff" },
+  ];
+
+  const els = [];
+  for (const r of rows) window.__addEl(r);
+  await W(150);
+  // 真机弹幕是分散到达的，这里也隔开一点，别一次性全灌进去（同 tick 内批量到达会抢配对槽）
+  for (const r of rows) { window.__feedJson(window.__danmaku(r)); await W(90); }
+  await W(1500);
+
+  // 固定弹幕（顶部/底部）——演示 -center 那一类也能标上
+  const top = document.createElement("div");
+  top.className = "bili-danmaku-x-dm bili-danmaku-x-center bili-danmaku-x-show";
+  top.style.setProperty("--fontSize", "25px");
+  top.style.setProperty("--color", "#ffffff");
+  top.style.setProperty("--top", "330px");
+  top.textContent = "这是顶部固定弹幕";
+  document.getElementById("dmc").appendChild(top);
+
+  const bottom = document.createElement("div");
+  bottom.className = "bili-danmaku-x-dm bili-danmaku-x-center bili-danmaku-x-show";
+  bottom.style.setProperty("--fontSize", "25px");
+  bottom.style.setProperty("--color", "#ff9ad5");
+  bottom.style.setProperty("--top", "430px");
+  bottom.textContent = "这是底部固定弹幕";
+  document.getElementById("dmc").appendChild(bottom);
+
+  await W(60);
+  window.__feedJson(window.__danmaku({ uid: "3006", name: "固定在顶部的观众", text: "这是顶部固定弹幕", color: "#ffffff" }));
+  window.__feedJson(window.__danmaku({ uid: "3007", name: "固定在底部的观众", text: "这是底部固定弹幕", color: "#ff9ad5" }));
+  await W(1200);
+
+  return {
+    nicks: document.querySelectorAll(".bf-nick").length,
+    total: document.querySelectorAll(".bili-danmaku-x-dm").length,
+    version: window.__bf && window.__bf.version,
+    marked: [...document.querySelectorAll(".bili-danmaku-x-dm")].map((el) => {
+      const n = el.querySelector(".bf-nick");
+      return (n ? n.textContent : "(无)") + " | " + el.textContent.replace(/^.*?：/, "").slice(0, 20);
+    }),
+  };
+};
+
+// ?auto=1 自动跑一遍，方便无头浏览器直接截图
+if (new URLSearchParams(location.search).get("auto") === "1") {
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      window.__demo().then((r) => {
+        // 把结果挂到 DOM 上，方便 --dump-dom 取（无头浏览器不好读 console）
+        document.getElementById("video").setAttribute("data-demo", JSON.stringify(r));
+        const missing = [...document.querySelectorAll(".bili-danmaku-x-dm")].filter((el) => !el.querySelector(".bf-nick"));
+        document.getElementById("video").setAttribute("data-missing", JSON.stringify(missing.map((el) => ({
+          text: el.textContent,
+          cls: el.className,
+          left: el.style.getPropertyValue("--left"),
+          rect: Math.round(el.getBoundingClientRect().left),
+        }))));
+        document.getElementById("video").setAttribute("data-matcher", JSON.stringify(window.__bf.matcherStats()));
+      });
+    }, 200);
+  });
+}
+</script>
+</body>
+</html>
