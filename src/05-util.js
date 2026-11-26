@@ -45,6 +45,38 @@ function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
 }
 
+// ===== 配对主键 =====
+// B站 弹幕渲染器（danmaku-v2.js）的 textData 里有 dmid / uid / isMine，但**一个都不写进 DOM**：
+//   实测弹幕元素只有 class 和 style（--color / --fontSize / --offset / --translateX / --duration / --top），
+//   没有 data-dmid、没有 id、也没有挂实例（elOwnProps 为空）。
+// 所以配对只能靠「文本 + FIFO」。同文本多人同时发时（实测一条「？」来自 7 个不同 uid）必然串人 ——
+//   这就是 Master 自己发弹幕时看到的「id 匹配错」。
+// 但 DOM 的 --color / --fontSize 是 WS 包 info[0][3] / info[0][2] 的直写，可以当**强指纹**：
+//   先按「指纹+文本」找，找不到再退回纯文本 FIFO。纯增益，不会造成新漏标。
+function pairKey(text, fp) {
+  const t = text || "";
+  const f = fp || "";
+  return f ? f + "\u0001" + t : t;
+}
+
+/** DOM 侧指纹：读 B站 写在元素 inline style 上的 CSS 变量（读不到就返回空，退化为纯文本配对）
+ *  注意必须**归一化**：B站 可能写 #fff / transparent / 带空格的 25px，
+ *  只有和 WS 侧同一套尺子（#rrggbb + Npx）比对才有意义。
+ *  任一部分非法就只留另一部分 —— 宁可少拦，不可错拦。 */
+function domFingerprint(el) {
+  try {
+    const rawColor = String(el.style.getPropertyValue("--color") || "").trim();
+    const rawSize = String(el.style.getPropertyValue("--fontSize") || "").trim();
+    const color = normalizeColor(rawColor, "").toLowerCase(); // 非法（如 transparent）→ ""；统一小写
+    const sizeNum = parseFloat(rawSize);
+    const size = isFinite(sizeNum) && sizeNum > 0 ? Math.round(sizeNum) + "px" : "";
+    if (!color && !size) return "";
+    return color + "|" + size;
+  } catch (_) {
+    return "";
+  }
+}
+
 // 把 "123456" 或 "#aabbcc" 或 "aabbcc" 统一成 #rrggbb；非法返回空串
 function normalizeColor(v, fallback) {
   const s = String(v || "").trim();

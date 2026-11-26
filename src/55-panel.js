@@ -103,7 +103,7 @@ function makeResizable(el, kw, kh) {
     e.stopPropagation();
     st = { x: e.clientX, y: e.clientY, w: el.offsetWidth, h: el.offsetHeight, id: e.pointerId };
     try { grip.setPointerCapture(e.pointerId); } catch (_) {}
-    document.documentElement.classList.add("bf-dragging");
+    setDragVisual(true, grip, el);
   });
   grip.addEventListener("pointermove", (e) => {
     if (!st) return;
@@ -115,7 +115,7 @@ function makeResizable(el, kw, kh) {
   grip.addEventListener("pointerup", () => {
     if (!st) return;
     st = null;
-    document.documentElement.classList.remove("bf-dragging");
+    setDragVisual(false, grip, el);
     state.settings[kw] = el.offsetWidth;
     state.settings[kh] = el.offsetHeight;
     saveSettings();
@@ -123,7 +123,7 @@ function makeResizable(el, kw, kh) {
   });
   grip.addEventListener("pointercancel", () => {
     st = null;
-    document.documentElement.classList.remove("bf-dragging");
+    setDragVisual(false, grip, el);
   });
 }
 
@@ -187,6 +187,24 @@ function syncDragSettings(el, kx, ky) {
   if (isFinite(y)) state.settings[ky] = y;
 }
 
+/** 拖动期间压住选字与光标。
+ *  ★ v2.5.4：原来靠给 <html> 挂 `.bf-dragging` + 通配规则，实测「挂一次类 = 90.9ms 样式重算」
+ *  （5900 节点全树重算），按下和松开各卡一下。改成只写两个 inline：
+ *    · 目标元素自身 user-select:none —— 拖动时鼠标扫过的就是它自己，够用
+ *    · 手柄自身 cursor:grabbing —— 有 pointer capture，光标一直停在手柄上
+ *  实测代价 ~1ms。不动 <html>，也不碰任何后代。 */
+function setDragVisual(on, handle, target) {
+  try {
+    if (on) {
+      if (target) target.style.setProperty("user-select", "none");
+      if (handle) handle.style.setProperty("cursor", "grabbing");
+    } else {
+      if (target) target.style.removeProperty("user-select");
+      if (handle) handle.style.removeProperty("cursor");
+    }
+  } catch (_) {}
+}
+
 function makeDraggable(handle, target, kx, ky, onClick) {
   let drag = null;
   let captured = false;
@@ -199,9 +217,8 @@ function makeDraggable(handle, target, kx, ky, onClick) {
     if (hit && hit !== handle) return;
     // 手柄本身是按钮（悬浮球）时不拦默认：没有要选的字，拦了反而影响 click/focus
     const handleIsButton = handle.tagName === "BUTTON";
-    // ★ 拖拽会顺手选中标题栏/面板里的文字（Master 2026-11-18 报）。两道闸：
-    //   ① pointerdown 就 preventDefault，压根不进入「选字」状态；
-    //   ② 真开始拖时给 <html> 挂 bf-dragging，整页 user-select:none，松手摘掉。
+    // ★ 拖拽会顺手选中标题栏/面板里的文字（Master 2026-11-18 报）。pointerdown 就 preventDefault，
+    //   压根不进入「选字」状态（v2.5.4 起不再依赖 <html> 上的通配类）。
     if (!handleIsButton) e.preventDefault();
     // 尺寸与视口只在按下这一刻取一次，之后整段拖动不再触碰布局
     // 起点用元素当前的 style.left/top（绝对定位值），不用 offsetLeft ——
@@ -227,7 +244,7 @@ function makeDraggable(handle, target, kx, ky, onClick) {
     const dy = e.clientY - drag.y;
     if (!drag.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
       drag.moved = true;
-      document.documentElement.classList.add("bf-dragging");
+      setDragVisual(true, handle, target);
       try { handle.setPointerCapture(drag.id); captured = true; } catch (_) {}
     }
     if (!drag.moved) return;
@@ -246,7 +263,7 @@ function makeDraggable(handle, target, kx, ky, onClick) {
   });
   const endDrag = (e, cancelled) => {
     if (!drag) return;
-    document.documentElement.classList.remove("bf-dragging");
+    setDragVisual(false, handle, target);
     if (captured) {
       try { handle.releasePointerCapture(drag.id); } catch (_) {}
       captured = false;
@@ -264,8 +281,8 @@ function makeDraggable(handle, target, kx, ky, onClick) {
   };
   handle.addEventListener("pointerup", (e) => endDrag(e, false));
   handle.addEventListener("pointercancel", () => endDrag(null, true));
-  // 极少数情况下 pointerup 会丢（窗口失焦等）：兜底摘掉拖拽态
-  window.addEventListener("blur", () => document.documentElement.classList.remove("bf-dragging"));
+  // 极少数情况下 pointerup 会丢（窗口失焦等）：兜底恢复光标/选字
+  window.addEventListener("blur", () => setDragVisual(false, handle, target));
 }
 
 // ---------- 行组件 ----------
@@ -317,6 +334,17 @@ function rowArea(label, key, placeholder, rows) {
   return (
     '<div class="bf-field"><div class="bf-lab">' + label + "</div>" +
     '<textarea class="bf-ta" data-key="' + key + '" rows="' + (rows || 3) + '" placeholder="' + escapeHtml(placeholder || "") + '"></textarea></div>'
+  );
+}
+
+// 高光效果多选：底牌 / 绕圈 / 涟漪，可以全选也可以全不选（全不选 = 只换色）
+const FX_OPTIONS = [["card", "底牌"], ["orbit", "绕圈光段"], ["ripple", "入场涟漪"]];
+function rowFx(label, sub, key) {
+  return (
+    '<div class="bf-row bf-row-sel"><span class="bf-lab">' + label + (sub ? '<span class="bf-sub">' + sub + "</span>" : "") + "</span>" +
+    '<span class="bf-seg bf-multi" data-key="' + key + '">' +
+    FX_OPTIONS.map((o) => '<button type="button" data-v="' + o[0] + '">' + o[1] + "</button>").join("") +
+    "</span></div>"
   );
 }
 
@@ -372,6 +400,12 @@ function buildPanel() {
             rowSwitch("自定义发光", "", "customFollowGlow") +
             rowSwitch("关注发光", "", "followGlow") +
             rowSwitch("粉丝发光", "", "fanGlow") +
+          "</div>" +
+          '<div class="bf-grp"><div class="bf-gt">高光效果（可多选，全不选 = 只换色）</div>' +
+            rowFx("自定义 / 指定人", "最显眼的一档", "customFollowFx") +
+            rowFx("已关注", "", "followFx") +
+            rowFx("粉丝数", "", "fanFx") +
+            rowFx("关键词", "命中面广，加框易满屏", "keywordFx") +
           "</div>" +
           '<div class="bf-grp"><div class="bf-gt">提醒</div>' +
             rowArea("关键词高亮", "keywordRules", "一行一个关键词，可用 关键词:#ff0000 指定颜色；# 开头是注释", 3) +
@@ -546,6 +580,15 @@ function bindPanelInputs(panel) {
   });
   panel.addEventListener("click", (e) => {
     const segBtn = e.target && e.target.closest && e.target.closest(".bf-seg button");
+    if (segBtn && segBtn.parentElement.classList.contains("bf-multi")) {
+      // 多选：点一下切换这一项，值存成 "card,orbit" 这种逗号串
+      const seg = segBtn.parentElement;
+      if (segBtn.getAttribute("data-on") === "1") segBtn.removeAttribute("data-on");
+      else segBtn.setAttribute("data-on", "1");
+      const on = [...seg.querySelectorAll("button")].filter((b) => b.getAttribute("data-on") === "1").map((b) => b.getAttribute("data-v"));
+      applySetting(seg.getAttribute("data-key"), on.join(","));
+      return;
+    }
     if (segBtn) {
       const seg = segBtn.parentElement;
       const key = seg.getAttribute("data-key");
@@ -586,6 +629,7 @@ const DISPLAY_KEYS = [
   "keywordRules", "keywordColor", "keywordGlow", "watchNames", "watchUids",
   "fanBadge", "fanColor", "fanGlow", "followBadge", "followColor", "followGlow",
   "customFollowBadge", "customFollowColor", "customFollowGlow",
+  "customFollowFx", "followFx", "fanFx", "keywordFx",
 ];
 
 const debouncedLightRefresh = debounce(() => {
@@ -631,6 +675,14 @@ function syncPanelValues() {
   panel.querySelectorAll("[data-key]").forEach((el) => {
     const key = el.getAttribute("data-key");
     const v = s[key];
+    if (el.classList && el.classList.contains("bf-multi")) {
+      const on = new Set(parseFx(v));
+      for (const b of el.querySelectorAll("button")) {
+        if (on.has(b.getAttribute("data-v"))) b.setAttribute("data-on", "1");
+        else b.removeAttribute("data-on");
+      }
+      return;
+    }
     if (el.classList && el.classList.contains("bf-seg")) {
       const btns = [...el.querySelectorAll("button")];
       const hit = btns.find((b) => b.getAttribute("data-v") === String(v)) || btns[0];

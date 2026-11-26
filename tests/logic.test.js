@@ -33,7 +33,8 @@ function loadLogic(files) {
     files.map((f) => fs.readFileSync(path.join(SRC, f), "utf8")).join("\n;\n") +
     "\n;globalThis.__t = { createMatcher, migrateSettings, composeNick, parseDanmakuInfo," +
     " normalizeText, emoticonFileKey, customNameSet, watchNameSet, watchUidSet, matchKeyword," +
-    " formatCount, DEFAULTS, state, setSettings: (s) => { state.settings = s; } };";
+    " formatCount, DEFAULTS, state, domFingerprint, pairKey, parseFx," +
+    " setSettings: (s) => { state.settings = s; } };";
 
   const sandbox = {
     console,
@@ -143,7 +144,7 @@ test("一条弹幕不会被两个元素重复消费", () => {
 console.log("\n[2] 配置迁移：老配置原样继承，只改旧默认残留");
 test("没有 cfgVer 的老配置 → 补 cfgVer、保留他自己调过的值", () => {
   const out = lib.migrateSettings({ nickSeparator: ":", fanThreshold: 50000, customFollowNames: "" });
-  assert.strictEqual(out.cfgVer, 3);
+  assert.strictEqual(out.cfgVer, 4);
   assert.strictEqual(out.nickSeparator, ":");
   assert.strictEqual(out.fanThreshold, 50000);
 });
@@ -158,7 +159,7 @@ test("已经写明 cfgVer=3 的不再改（用户主动关掉就尊重）", () =
 });
 test("cfgVer=2 的老用户升级：长前缀默认关掉（治同轨压字）", () => {
   const out = lib.migrateSettings({ cfgVer: 2, medalMark: true, guardMark: true, adminMark: true, topTalkerMark: true });
-  assert.strictEqual(out.cfgVer, 3);
+  assert.strictEqual(out.cfgVer, 4);
   assert.strictEqual(out.medalMark, false);
   assert.strictEqual(out.guardMark, false);
   assert.strictEqual(out.adminMark, false);
@@ -383,6 +384,129 @@ test("诊断必须单独统计顶部/底部固定弹幕（否则永远显示漏 
   const src = fs.readFileSync(path.join(SRC, "70-main.js"), "utf8");
   assert.ok(src.includes("固定弹幕 顶部="), "dumpDiag 没有固定弹幕统计行");
   assert.ok(src.includes("isFixedDanmaku(el)"), "dumpDiag 没有把固定弹幕分流");
+});
+
+console.log("\n[10] 同文本串人（v2.5.4 指纹配对）");
+test("WS 侧指纹尺子：颜色取 #rrggbb、字号取整 px", () => {
+  const id = lib.parseDanmakuInfo({ info: [[0, 1, 25, 16777215, 0, 0, 0, "x"], "hi", [12345, "阿A"]] });
+  assert.strictEqual(id.fp, "#ffffff|25px", "指纹格式必须是 #rrggbb|Npx，否则和 DOM 侧对不上");
+});
+test("WS 侧颜色非法/缺字段时不硬造指纹（宁可不拦也不能错拦）", () => {
+  const id = lib.parseDanmakuInfo({ info: [[0, 1, 25, 0, 0, 0, 0, "x"], "hi", [12345, "阿A"]] });
+  assert.strictEqual(id.fp, "|25px", "颜色为 0 时应留空，只保留字号");
+});
+test("DOM 侧指纹与 WS 侧同一套尺子（#fff / 带空格 px 都要归一）", () => {
+  const fake = { style: { getPropertyValue: (k) => ({ "--color": "#FFF", "--fontSize": " 25px " }[k] || "") } };
+  assert.strictEqual(lib.domFingerprint(fake), "#ffffff|25px");
+});
+test("DOM 侧 transparent 不当颜色用（B站 神秘人/超管会写 transparent）", () => {
+  const fake = { style: { getPropertyValue: (k) => ({ "--color": "transparent", "--fontSize": "25px" }[k] || "") } };
+  assert.strictEqual(lib.domFingerprint(fake), "|25px");
+});
+test("同文本不同颜色 → 不串人（这正是「自己发弹幕时 id 匹配错」的根因）", () => {
+  const m = lib.createMatcher({ ttl: 3000, ahead: 500, isAlive: () => true });
+  // 两个人先后发「？」：A 是白字，B 是彩色
+  m.onArrival({ key: "？", altKey: "？", fp: "#ffffff|25px", ts: 1000, identity: { uid: "A" } });
+  m.onArrival({ key: "？", altKey: "？", fp: "#ff0000|25px", ts: 1100, identity: { uid: "B" } });
+  // B 的弹幕元素先出现（彩色）
+  const hit = m.onElement({ key: "？", altKey: "？", fp: "#ff0000|25px", el: {}, seenAt: 1200 });
+  assert.ok(hit, "彩色那条应该配上");
+  assert.strictEqual(hit.arrival.identity.uid, "B", "配到了错误的 uid：指纹没起作用");
+});
+test("一边没有指纹时必须退回纯文本 FIFO（不许因为读不到 --color 就漏标）", () => {
+  const m = lib.createMatcher({ ttl: 3000, ahead: 500, isAlive: () => true });
+  m.onArrival({ key: "嘉门", altKey: "嘉门", fp: "#ffffff|25px", ts: 1000, identity: { uid: "A" } });
+  const hit = m.onElement({ key: "嘉门", altKey: "嘉门", fp: "", el: {}, seenAt: 1100 });
+  assert.ok(hit, "DOM 没指纹时不能漏标");
+  assert.strictEqual(hit.arrival.identity.uid, "A");
+});
+test("指纹命中计入诊断（否则现场分不清是真修好还是没走到）", () => {
+  const m = lib.createMatcher({ ttl: 3000, ahead: 500, isAlive: () => true });
+  m.onArrival({ key: "1", altKey: "1", fp: "#ffffff|25px", ts: 1000, identity: { uid: "A" } });
+  m.onElement({ key: "1", altKey: "1", fp: "#ffffff|25px", el: {}, seenAt: 1100 });
+  assert.ok(m.stats.fpKeyed > 0, "指纹命中没有计数");
+});
+
+console.log("\n[11] 拖动卡顿（v2.5.4 拆掉 .bf-dragging 通配规则）");
+test("样式里不许再有 `.bf-dragging *` 通配规则（实测挂一次类 90.9ms 全树重算）", () => {
+  const css = fs.readFileSync(path.join(SRC, "ui.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.ok(css.indexOf(".bf-dragging") < 0, "通配拖拽规则又回来了：按下/松开会各卡 90ms");
+});
+test("拖动视觉只写 inline，不动 <html> 的 classList", () => {
+  const src = fs.readFileSync(path.join(SRC, "55-panel.js"), "utf8");
+  assert.ok(src.indexOf("document.documentElement.classList.add(\"bf-dragging\")") < 0, "又在给 <html> 挂类了");
+  assert.ok(src.indexOf("function setDragVisual") > 0, "缺少 inline 版拖拽视觉");
+});
+
+console.log("\n[12] 高光效果分档（v2.6：底牌 / 绕圈 / 涟漪，每档可多选）");
+test("默认配置：◆=底牌+绕圈+涟漪，❤=底牌+涟漪，⭐=底牌，关键词=只换色", () => {
+  assert.strictEqual(lib.DEFAULTS.customFollowFx, "card,orbit,ripple");
+  assert.strictEqual(lib.DEFAULTS.followFx, "card,ripple");
+  assert.strictEqual(lib.DEFAULTS.fanFx, "card");
+  assert.strictEqual(lib.DEFAULTS.keywordFx, "");
+});
+test("parseFx：去重、丢未知值、顺序固定、兼容中文逗号和空格", () => {
+  assert.strictEqual(JSON.stringify(lib.parseFx("ripple， card card blink")), JSON.stringify(["card", "ripple"]));
+  assert.strictEqual(JSON.stringify(lib.parseFx("")), "[]");
+  assert.strictEqual(JSON.stringify(lib.parseFx(undefined)), "[]");
+});
+test("多档同时命中只取最高一档的效果（自定义压过关注）", () => {
+  const s = settingsWith({ customFollowMark: true, customFollowNames: "普通观众", followFx: "ripple" });
+  lib.setSettings(s);
+  const d = lib.composeNick(idBase, { uname: "普通观众", follower: 0, followed: true }, s, { customSet: lib.customNameSet(s) });
+  assert.strictEqual(d.tier, "custom");
+  assert.strictEqual(JSON.stringify(d.fx), JSON.stringify(["card", "orbit", "ripple"]));
+});
+test("只关注：拿到关注档的效果", () => {
+  const s = settingsWith({ customFollowMark: false });
+  lib.setSettings(s);
+  const d = lib.composeNick(idBase, { uname: "普通观众", follower: 0, followed: true }, s, {});
+  assert.strictEqual(d.tier, "follow");
+  assert.strictEqual(JSON.stringify(d.fx), JSON.stringify(["card", "ripple"]));
+});
+test("把某档全部取消 = 只换色不加框", () => {
+  const s = settingsWith({ customFollowMark: false, followFx: "" });
+  lib.setSettings(s);
+  const d = lib.composeNick(idBase, { uname: "普通观众", follower: 0, followed: true }, s, {});
+  assert.ok(d.color, "颜色应该还在");
+  assert.strictEqual(d.fx.length, 0);
+});
+test("没命中任何档：没有效果层", () => {
+  const s = settingsWith({ customFollowMark: false });
+  lib.setSettings(s);
+  const d = lib.composeNick(idBase, { uname: "普通观众", follower: 0, followed: false }, s, {});
+  assert.strictEqual(d.tier, "");
+  assert.strictEqual(d.fx.length, 0);
+});
+test("v3→v4：◆ 仍是旧默认 #0011ff 的换成青色，其余 v3 设置不动", () => {
+  const out = lib.migrateSettings({ cfgVer: 3, customFollowColor: "#0011FF", emojiNick: false, medalMark: true });
+  assert.strictEqual(out.customFollowColor, "#22d3ee");
+  assert.strictEqual(out.emojiNick, false);
+  assert.strictEqual(out.medalMark, true);
+  assert.strictEqual(out.cfgVer, 4);
+});
+test("v3→v4：用户自己挑过的 ◆ 颜色保持不动", () => {
+  const out = lib.migrateSettings({ cfgVer: 3, customFollowColor: "#ff00aa" });
+  assert.strictEqual(out.customFollowColor, "#ff00aa");
+});
+test("cfgVer=4 后再改回 #0011ff 的尊重用户（不会被再次迁移）", () => {
+  const out = lib.migrateSettings({ cfgVer: 4, customFollowColor: "#0011ff" });
+  assert.strictEqual(out.customFollowColor, "#0011ff");
+});
+test("老配置（没有 *Fx 键）迁移后拿到默认效果", () => {
+  const out = lib.migrateSettings({ cfgVer: 3, followMark: true });
+  assert.strictEqual(out.followFx, "card,ripple");
+});
+test("样式：效果层不占布局宽度（绝对定位 + z-index:-1），否则会改 B站 滚动速度", () => {
+  const css = fs.readFileSync(path.join(SRC, "ui.css"), "utf8");
+  const m = css.match(/\.bf-fx \{([\s\S]*?)\}/);
+  assert.ok(m, "缺 .bf-fx 规则");
+  assert.ok(/position:\s*absolute/.test(m[1]) && /z-index:\s*-1/.test(m[1]), "效果层必须绝对定位在正文后面");
+});
+test("撤装饰时效果层跟着撤（removeOwnSpan 里调 removeFx）", () => {
+  const src = fs.readFileSync(path.join(SRC, "35-decorate.js"), "utf8");
+  const body = src.slice(src.indexOf("function removeOwnSpan"), src.indexOf("// ===== 高光效果层"));
+  assert.ok(body.indexOf("removeFx(st)") > 0, "回收/复用时会留下残框");
 });
 
 console.log("\n结果：" + passed + " 通过 / " + failed + " 失败");

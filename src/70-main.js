@@ -136,7 +136,8 @@ function dumpDiag() {
     " 风控退避剩余=" + Math.max(0, Math.round((API.riskUntil - Date.now()) / 1000)) + "s 等级=" + API.riskLevel);
   const ms = danmakuMatcher ? danmakuMatcher.stats : {};
   out.push("配对器 到达=" + (ms.arrivals || 0) + " 元素=" + (ms.elements || 0) + " 成功=" + (ms.matched || 0) +
-    " 待等=" + (ms.failed || 0) + " 空壳作废=" + (ms.staleSlot || 0) + " 重复槽=" + (ms.dupSlot || 0));
+    " 待等=" + (ms.failed || 0) + " 空壳作废=" + (ms.staleSlot || 0) + " 重复槽=" + (ms.dupSlot || 0) +
+    " 指纹命中=" + (ms.fpKeyed || 0));
   out.push("绘制 成功=" + st.paintOk + " 无身份=" + st.paintNoId + " 无名=" + st.paintNoName + " 同签名跳过=" + st.paintSame +
     " 隐藏=" + (st.nickHidden || 0) + " 熔断补跑=" + (st.runaway || 0));
   out.push("记录 条数=" + recState.records.length + " 触发=" + st.recCaptured + " 去重挡=" + st.recDedup + " 进场提示=" + st.enter);

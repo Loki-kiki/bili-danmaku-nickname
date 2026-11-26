@@ -24,12 +24,39 @@ function createMatcher(opt) {
   const slotByEl = new WeakMap(); // el -> slot（一个元素只许有一个未完成的槽）
   let seq = 0;
 
-  const stats = { arrivals: 0, elements: 0, matched: 0, failed: 0, pendingHit: 0, staleSlot: 0, dupSlot: 0 };
+  const stats = { arrivals: 0, elements: 0, matched: 0, failed: 0, pendingHit: 0, staleSlot: 0, dupSlot: 0, fpKeyed: 0, fpMiss: 0 };
+
+  // 指纹弱化成「兼容」而不是「相等」：任一边缺指纹就放行。
+  // 宁可退回纯文本 FIFO（旧口径），也不能因为拿不到 --color 就整条漏标。
+  function fpCompatible(a, b) {
+    const fa = a && a.fp ? String(a.fp) : "";
+    const fb = b && b.fp ? String(b.fp) : "";
+    if (!fa || !fb) return true;
+    return fa === fb;
+  }
+
+  // 强键 → 纯文本键（liveKeyOf 只会返回纯文本，比对前要剥掉指纹前缀）
+  function plainKeyOf(key) {
+    const s = String(key || "");
+    if (s.indexOf("F\u0001") === 0) {
+      const rest = s.slice(2);
+      const i = rest.indexOf("\u0001");
+      return i >= 0 ? rest.slice(i + 1) : rest;
+    }
+    return s;
+  }
 
   function keysOf(item) {
     const keys = [];
-    if (item.key) keys.push(item.key);
-    if (item.altKey && item.altKey !== item.key) keys.push(item.altKey);
+    // ★ 强键优先：指纹 + 文本。同文本多人同时发时，只有它能把人和弹幕对上。
+    if (item.key) {
+      if (item.fp) keys.push("F\u0001" + item.fp + "\u0001" + item.key);
+      keys.push(item.key);
+    }
+    if (item.altKey && item.altKey !== item.key) {
+      if (item.fp) keys.push("F\u0001" + item.fp + "\u0001" + item.altKey);
+      keys.push(item.altKey);
+    }
     if (Array.isArray(item.emojiKeys)) {
       for (const k of item.emojiKeys) if (k) keys.push("e:" + k);
     }
@@ -53,7 +80,7 @@ function createMatcher(opt) {
       stats.staleSlot += 1;
       return false;
     }
-    if (liveKeyOf && liveKeyOf(slot.el) !== key) {
+    if (liveKeyOf && liveKeyOf(slot.el) !== plainKeyOf(key)) {
       slot.done = true;
       stats.staleSlot += 1;
       return false;
@@ -83,7 +110,7 @@ function createMatcher(opt) {
     }
   }
 
-  function takeArrival(key, at, fixed) {
+  function takeArrival(key, at, fixed, fp) {
     const list = buckets.get(key);
     if (!list) return null;
     const ttl = fixed ? TTLF : TTL;
@@ -92,6 +119,8 @@ function createMatcher(opt) {
       if (item.used || item.dropped) continue;
       if (at - item.ts > ttl) continue; // 太老的不能拿来充数
       if (item.ts - at > AHEAD) continue; // 还没到的也不能用
+      // ★ 指纹闸：两边都有指纹且不同 → 一定不是同一条（同文本不同人），跳过
+      if (!fpCompatible(item, { fp })) continue;
       if (!best || item.ts < best.ts) best = item; // 同文本按 FIFO 取最早
     }
     if (best) best.used = true;
@@ -118,6 +147,8 @@ function createMatcher(opt) {
       stats.pendingHit = 0;
       stats.staleSlot = 0;
       stats.dupSlot = 0;
+      stats.fpKeyed = 0;
+      stats.fpMiss = 0;
     },
 
     /** WS 到达一条弹幕：先看有没有等它的元素，没有就入队 */
@@ -133,6 +164,7 @@ function createMatcher(opt) {
         if (!list || !list.length) continue;
         for (const slot of list) {
           if (!slotStillValid(slot, key)) continue;
+          if (!fpCompatible(slot, rec)) continue;
           if (rec.ts - slot.seenAt > ttlFor(slot)) continue;
           if (slot.seenAt - rec.ts > AHEAD) continue;
           if (!hit || slot.seenAt < hit.seenAt) {
@@ -167,7 +199,7 @@ function createMatcher(opt) {
       if (hasEl) {
         const prev = slotByEl.get(rec.el);
         if (prev && !prev.done) {
-          if (prev.key === rec.key) {
+          if (prev.key === rec.key && prev.fp === rec.fp) {
             stats.dupSlot += 1;
             return null; // 同一个元素同一个 key，重复登记没意义
           }
@@ -179,8 +211,9 @@ function createMatcher(opt) {
 
       let arrival = null;
       for (const key of keysOf(rec)) {
-        const hit = takeArrival(key, seenAt, rec.fixed);
+        const hit = takeArrival(key, seenAt, rec.fixed, rec.fp);
         if (hit) {
+          if (String(key).indexOf("F\u0001") === 0) stats.fpKeyed += 1;
           arrival = hit;
           break;
         }

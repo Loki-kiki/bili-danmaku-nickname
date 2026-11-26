@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站(bilibili)直播画面弹幕昵称标注
 // @namespace    https://live.bilibili.com/
-// @version      2.5.3
+// @version      2.6.0
 // @description  仅增强B站直播画面上的飘动弹幕：显示发送者昵称，标注粉丝数/已关注/自定义名单/粉丝牌/等级/舰长/房管，悬停出身份卡。
 // @author       Loki-kiki
 // @homepageURL  https://github.com/Loki-kiki/bili-danmaku-nickname
@@ -28,7 +28,7 @@
 // ==/UserScript==
 (function () {
   "use strict";
-  const VERSION = "2.5.3";
+  const VERSION = "2.6.0";
 // ===== 00-base.js =====
 // ===== 全局常量与运行态 =====
 // VERSION 由 build.js 在文件头注入（单一来源：version.js）
@@ -42,7 +42,7 @@ const USER_CACHE_KEY = "blfdn_user_cache_v1";
 const HL_KEY = "blfdn_highlights_v1";
 
 // 配置格式版本：读到没有 cfgVer 的老配置走一次性迁移
-const CFG_VER = 3;
+const CFG_VER = 4;
 
 const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
 
@@ -167,6 +167,38 @@ function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, v));
 }
 
+// ===== 配对主键 =====
+// B站 弹幕渲染器（danmaku-v2.js）的 textData 里有 dmid / uid / isMine，但**一个都不写进 DOM**：
+//   实测弹幕元素只有 class 和 style（--color / --fontSize / --offset / --translateX / --duration / --top），
+//   没有 data-dmid、没有 id、也没有挂实例（elOwnProps 为空）。
+// 所以配对只能靠「文本 + FIFO」。同文本多人同时发时（实测一条「？」来自 7 个不同 uid）必然串人 ——
+//   这就是 Master 自己发弹幕时看到的「id 匹配错」。
+// 但 DOM 的 --color / --fontSize 是 WS 包 info[0][3] / info[0][2] 的直写，可以当**强指纹**：
+//   先按「指纹+文本」找，找不到再退回纯文本 FIFO。纯增益，不会造成新漏标。
+function pairKey(text, fp) {
+  const t = text || "";
+  const f = fp || "";
+  return f ? f + "\u0001" + t : t;
+}
+
+/** DOM 侧指纹：读 B站 写在元素 inline style 上的 CSS 变量（读不到就返回空，退化为纯文本配对）
+ *  注意必须**归一化**：B站 可能写 #fff / transparent / 带空格的 25px，
+ *  只有和 WS 侧同一套尺子（#rrggbb + Npx）比对才有意义。
+ *  任一部分非法就只留另一部分 —— 宁可少拦，不可错拦。 */
+function domFingerprint(el) {
+  try {
+    const rawColor = String(el.style.getPropertyValue("--color") || "").trim();
+    const rawSize = String(el.style.getPropertyValue("--fontSize") || "").trim();
+    const color = normalizeColor(rawColor, "").toLowerCase(); // 非法（如 transparent）→ ""；统一小写
+    const sizeNum = parseFloat(rawSize);
+    const size = isFinite(sizeNum) && sizeNum > 0 ? Math.round(sizeNum) + "px" : "";
+    if (!color && !size) return "";
+    return color + "|" + size;
+  } catch (_) {
+    return "";
+  }
+}
+
 // 把 "123456" 或 "#aabbcc" 或 "aabbcc" 统一成 #rrggbb；非法返回空串
 function normalizeColor(v, fallback) {
   const s = String(v || "").trim();
@@ -223,7 +255,7 @@ const DEFAULTS = {
   customFollowMark: false,
   customFollowNames: "",
   customFollowBadge: "◆",
-  customFollowColor: "#0011ff",
+  customFollowColor: "#22d3ee",
   customFollowGlow: true,
   emojiNick: true,
   recordEnabled: true,
@@ -262,6 +294,12 @@ const DEFAULTS = {
   watchEnter: true, // 指定人进直播间提示
   topTalkerMark: false, // 熟面孔排名（默认关）
   topTalkerCount: 10,
+  // —— v2.6 高光效果（每档可多选，逗号分隔：card=底牌 / orbit=绕行光段 / ripple=入场涟漪）——
+  // 分档原则：越贵的效果给越少的人。同屏全是高光 = 没有高光。
+  customFollowFx: "card,orbit,ripple", // 自定义名单 / 指定人：最高档
+  followFx: "card,ripple", // 已关注
+  fanFx: "card", // 粉丝数达标
+  keywordFx: "", // 关键词：保持换色即可（命中面广，加框会满屏）
   cfgVer: CFG_VER,
 };
 
@@ -291,7 +329,8 @@ function migrateSettings(raw) {
 
   // v1→v2：emojiNick 老默认 false（当时实现有 bug，他只好关掉）。
   // 新版表情弹幕昵称是必须项，这里把「仍是老默认 false」的一次性打开；真的想要 false 的人在面板里关掉即可。
-  if (src.emojiNick === false) out.emojiNick = true;
+  // ★ CFG_VER 升到 4 后必须加 from<3 门控，否则 v3 用户主动关掉的 emojiNick 会被重新打开
+  if (from < 3 && src.emojiNick === false) out.emojiNick = true;
 
   // v2→v3：v2.0.0 把粉丝牌/舰长/房管/排名默认打开，真机实测会把弹幕撑宽、同轨互相压字。
   // 这几项改为默认关（详细信息移到悬停身份卡）。只动「还是默认值 true」的，用户主动关过的保持。
@@ -300,6 +339,12 @@ function migrateSettings(raw) {
     out.guardMark = false;
     out.adminMark = false;
     out.topTalkerMark = false;
+  }
+
+  // v3→v4（2.6.0）：◆ 默认色 #0011ff 深蓝在暗底牌上看不清，最高档反而最不显眼，默认改青色。
+  // 只换「仍是旧默认值」的；用户在面板里挑过别的颜色保持不动。
+  if (from < 4 && String(src.customFollowColor || "").toLowerCase() === "#0011ff") {
+    out.customFollowColor = DEFAULTS.customFollowColor;
   }
 
   // 老版「自定义名单」是昵称字符串，v2 仍然兼容（保存时顺带解析 UID），不需要改写文本
@@ -1224,11 +1269,23 @@ function parseDanmakuInfo(msg) {
   // matchText：去掉 [表情] 占位符——画面上它们渲染成图，不计入文字
   const matchText = normalizeText(text.replace(/\[[^\[\]]{1,20}\]/g, ""));
 
+  // ★ v2.5.4 配对指纹：B站 渲染器把 info[0][3]（颜色）与 info[0][2]（字号）原样写进
+  //   DOM 元素的 inline `--color` / `--fontSize`。用它把「同文本不同人」分开 ——
+  //   没有它，一条「？」来自 7 个人时纯 FIFO 必然串人（Master 自己发弹幕时撞见的就是这个）。
+  //   只在两边都读得到时才拦，读不到就退回纯文本，绝不因此漏标。
+  //   尺子必须和 domFingerprint 一致：#rrggbb + 取整 px。
+  const colorInt = Number(info[0] && info[0][3]);
+  const sizeInt = Number(info[0] && info[0][2]);
+  const colorHex = isFinite(colorInt) && colorInt > 0 ? "#" + (colorInt & 0xffffff).toString(16).padStart(6, "0") : "";
+  const sizePx = isFinite(sizeInt) && sizeInt > 0 ? Math.round(sizeInt) + "px" : "";
+  const fp = colorHex || sizePx ? colorHex + "|" + sizePx : "";
+
   return {
     uid,
     name,
     text,
     matchText,
+    fp,
     emoticonKeys,
     medal,
     userLevel,
@@ -1317,6 +1374,16 @@ function matchKeyword(text, settings) {
   return null;
 }
 
+// ===== 高光效果档位 =====
+const FX_KEY = { custom: "customFollowFx", follow: "followFx", fan: "fanFx", keyword: "keywordFx" };
+const FX_ALL = ["card", "orbit", "ripple"]; // 底牌 / 绕行光段 / 入场涟漪
+
+/** "card, orbit,xx" → ["card","orbit"]：去重、丢未知值、按固定顺序输出（签名稳定） */
+function parseFx(raw) {
+  const set = new Set(String(raw == null ? "" : raw).split(/[\s,，+|]+/).map((x) => x.trim().toLowerCase()));
+  return FX_ALL.filter((f) => set.has(f));
+}
+
 /**
  * 拼昵称前缀（纯函数）：badges 依次为 ◆自定义/指定人 → ❤已关注 → ⭐粉丝数
  * → 粉丝牌 Lv.N → 身份标签 → 熟面孔排名
@@ -1399,6 +1466,11 @@ function composeNick(identity, meta, settings, ctx) {
     wholeGlow = !!settings.keywordGlow;
   }
 
+  // 高光效果只取「命中的最高一档」，跟颜色的取法一致（自定义 > 关注 > 粉丝 > 关键词）
+  const isFollow = !!(settings.followMark && meta && meta.followed);
+  const tier = isCustom || isWatch ? "custom" : isFollow ? "follow" : fanHit ? "fan" : kw ? "keyword" : "";
+  const fx = tier && wholeColor ? parseFx(settings[FX_KEY[tier]]) : [];
+
   return {
     badges,
     nick,
@@ -1407,6 +1479,8 @@ function composeNick(identity, meta, settings, ctx) {
     smallSize: Number(settings.nickSmallSize) || 12,
     color: wholeColor,
     glow: wholeGlow,
+    tier,
+    fx,
     flags: { custom: isCustom || isWatch, follow: !!(settings.followMark && meta && meta.followed), fan: fanHit, keyword: !!kw },
   };
 }
@@ -1438,12 +1512,39 @@ function createMatcher(opt) {
   const slotByEl = new WeakMap(); // el -> slot（一个元素只许有一个未完成的槽）
   let seq = 0;
 
-  const stats = { arrivals: 0, elements: 0, matched: 0, failed: 0, pendingHit: 0, staleSlot: 0, dupSlot: 0 };
+  const stats = { arrivals: 0, elements: 0, matched: 0, failed: 0, pendingHit: 0, staleSlot: 0, dupSlot: 0, fpKeyed: 0, fpMiss: 0 };
+
+  // 指纹弱化成「兼容」而不是「相等」：任一边缺指纹就放行。
+  // 宁可退回纯文本 FIFO（旧口径），也不能因为拿不到 --color 就整条漏标。
+  function fpCompatible(a, b) {
+    const fa = a && a.fp ? String(a.fp) : "";
+    const fb = b && b.fp ? String(b.fp) : "";
+    if (!fa || !fb) return true;
+    return fa === fb;
+  }
+
+  // 强键 → 纯文本键（liveKeyOf 只会返回纯文本，比对前要剥掉指纹前缀）
+  function plainKeyOf(key) {
+    const s = String(key || "");
+    if (s.indexOf("F\u0001") === 0) {
+      const rest = s.slice(2);
+      const i = rest.indexOf("\u0001");
+      return i >= 0 ? rest.slice(i + 1) : rest;
+    }
+    return s;
+  }
 
   function keysOf(item) {
     const keys = [];
-    if (item.key) keys.push(item.key);
-    if (item.altKey && item.altKey !== item.key) keys.push(item.altKey);
+    // ★ 强键优先：指纹 + 文本。同文本多人同时发时，只有它能把人和弹幕对上。
+    if (item.key) {
+      if (item.fp) keys.push("F\u0001" + item.fp + "\u0001" + item.key);
+      keys.push(item.key);
+    }
+    if (item.altKey && item.altKey !== item.key) {
+      if (item.fp) keys.push("F\u0001" + item.fp + "\u0001" + item.altKey);
+      keys.push(item.altKey);
+    }
     if (Array.isArray(item.emojiKeys)) {
       for (const k of item.emojiKeys) if (k) keys.push("e:" + k);
     }
@@ -1467,7 +1568,7 @@ function createMatcher(opt) {
       stats.staleSlot += 1;
       return false;
     }
-    if (liveKeyOf && liveKeyOf(slot.el) !== key) {
+    if (liveKeyOf && liveKeyOf(slot.el) !== plainKeyOf(key)) {
       slot.done = true;
       stats.staleSlot += 1;
       return false;
@@ -1497,7 +1598,7 @@ function createMatcher(opt) {
     }
   }
 
-  function takeArrival(key, at, fixed) {
+  function takeArrival(key, at, fixed, fp) {
     const list = buckets.get(key);
     if (!list) return null;
     const ttl = fixed ? TTLF : TTL;
@@ -1506,6 +1607,8 @@ function createMatcher(opt) {
       if (item.used || item.dropped) continue;
       if (at - item.ts > ttl) continue; // 太老的不能拿来充数
       if (item.ts - at > AHEAD) continue; // 还没到的也不能用
+      // ★ 指纹闸：两边都有指纹且不同 → 一定不是同一条（同文本不同人），跳过
+      if (!fpCompatible(item, { fp })) continue;
       if (!best || item.ts < best.ts) best = item; // 同文本按 FIFO 取最早
     }
     if (best) best.used = true;
@@ -1532,6 +1635,8 @@ function createMatcher(opt) {
       stats.pendingHit = 0;
       stats.staleSlot = 0;
       stats.dupSlot = 0;
+      stats.fpKeyed = 0;
+      stats.fpMiss = 0;
     },
 
     /** WS 到达一条弹幕：先看有没有等它的元素，没有就入队 */
@@ -1547,6 +1652,7 @@ function createMatcher(opt) {
         if (!list || !list.length) continue;
         for (const slot of list) {
           if (!slotStillValid(slot, key)) continue;
+          if (!fpCompatible(slot, rec)) continue;
           if (rec.ts - slot.seenAt > ttlFor(slot)) continue;
           if (slot.seenAt - rec.ts > AHEAD) continue;
           if (!hit || slot.seenAt < hit.seenAt) {
@@ -1581,7 +1687,7 @@ function createMatcher(opt) {
       if (hasEl) {
         const prev = slotByEl.get(rec.el);
         if (prev && !prev.done) {
-          if (prev.key === rec.key) {
+          if (prev.key === rec.key && prev.fp === rec.fp) {
             stats.dupSlot += 1;
             return null; // 同一个元素同一个 key，重复登记没意义
           }
@@ -1593,8 +1699,9 @@ function createMatcher(opt) {
 
       let arrival = null;
       for (const key of keysOf(rec)) {
-        const hit = takeArrival(key, seenAt, rec.fixed);
+        const hit = takeArrival(key, seenAt, rec.fixed, rec.fp);
         if (hit) {
+          if (String(key).indexOf("F\u0001") === 0) stats.fpKeyed += 1;
           arrival = hit;
           break;
         }
@@ -1697,6 +1804,93 @@ function removeOwnSpan(el, st) {
     } catch (_) {}
   }
   if (st) st.span = null;
+  // 高光层跟昵称同生同灭：所有「撤装饰」的路径（回收 / 复用 / 空壳）都走这里
+  removeFx(st);
+}
+
+// ===== 高光效果层（v2.6）=====
+// 一个挂在弹幕元素里的 z-index:-1 层，用 left/right 负内缩把「左侧昵称 + 正文」一起包住，
+// 宽度不用 JS 算：昵称宽度写进 --bf-nw，其余交给 CSS。不占布局宽度 → 不改 B站 的滚动速度。
+//   card   = 半透明档位色底牌 + 左侧色条（常驻，中途看过来也认得出）
+//   orbit  = 两段光沿框绕圈（每帧重绘，同屏限量）
+//   ripple = 出场时向外扩散两圈（只在出现/身份刚查到的那一刻）
+const FX_ORBIT_MAX = 6;
+const fxOrbits = new Set();
+
+function removeFx(st) {
+  if (!st) return;
+  if (st.fx) {
+    try {
+      st.fx.remove();
+    } catch (_) {}
+    fxOrbits.delete(st.fx);
+  }
+  st.fx = null;
+  st.fxKey = "";
+  st.fxW = -1;
+}
+
+function fxNickW(st) {
+  const span = st.span;
+  if (!span) return 0;
+  const html = span.__bfHtml || "";
+  if (!html) return 0;
+  if (!st.nickM || st.nickM.html !== html) {
+    st.nickM = { html, w12: measureNickWidth(html, NICK_FONT_MAX, getComputedStyle(span)) };
+  }
+  return Math.max(NICK_FLOOR_W, Math.min(st.nickM.w12, NICK_CAP_W));
+}
+
+function syncFxGeom(st) {
+  const fx = st.fx;
+  if (!fx) return;
+  const w = fxNickW(st);
+  if (st.fxW !== w) {
+    st.fxW = w;
+    fx.style.setProperty("--bf-nw", w + "px");
+  }
+  const right = st.nickSide === "right";
+  if (fx.classList.contains("bf-fx-r") !== right) fx.classList.toggle("bf-fx-r", right);
+}
+
+function applyFx(el, st, display) {
+  let list = display.color && display.fx ? display.fx.slice() : [];
+  if (!list.length) {
+    removeFx(st);
+    return;
+  }
+  const key = list.join("+") + "|" + display.color;
+  if (st.fx && st.fx.parentNode === el && st.fxKey === key) {
+    syncFxGeom(st);
+    return;
+  }
+  removeFx(st);
+  for (const o of fxOrbits) if (!o.isConnected) fxOrbits.delete(o);
+  // 绕圈每帧重绘：同屏超过上限的降级为「底牌/涟漪」，不让它把页面拖慢，也避免满屏都在转
+  if (list.indexOf("orbit") >= 0 && fxOrbits.size >= FX_ORBIT_MAX) {
+    list = list.filter((f) => f !== "orbit");
+    state.stats.fxOrbitCapped = (state.stats.fxOrbitCapped || 0) + 1;
+  }
+  st.fxKey = key; // 记原始 key：降级过的这条不会每次重画都重试
+  if (!list.length) return;
+  const fx = document.createElement("span");
+  fx.className = "bf-fx " + list.map((f) => "bf-fx-" + f).join(" ");
+  fx.setAttribute("aria-hidden", "true");
+  fx.style.setProperty("--bf-c", display.color);
+  let html = "";
+  if (list.indexOf("ripple") >= 0) html += '<i class="bf-fx-rip"></i>';
+  if (list.indexOf("orbit") >= 0) {
+    html +=
+      '<svg class="bf-fx-orb"><rect class="o1" x="1" y="1" rx="6" pathLength="100"></rect>' +
+      '<rect class="o2" x="1" y="1" rx="6" pathLength="100"></rect></svg>';
+  }
+  fx.innerHTML = html;
+  el.appendChild(fx);
+  st.fx = fx;
+  st.fxW = -1;
+  if (list.indexOf("orbit") >= 0) fxOrbits.add(fx);
+  state.stats.fxPainted = (state.stats.fxPainted || 0) + 1;
+  syncFxGeom(st);
 }
 
 function restoreStyle(el, st) {
@@ -1883,6 +2077,8 @@ function fitAllNicks() {
         span.style.removeProperty("text-shadow");
       }
     }
+    // 高光层跟着昵称宽度/左右翻转走（值没变就不写 DOM）
+    if (cur.st.fx) syncFxGeom(cur.st);
   }
 }
 
@@ -1918,6 +2114,7 @@ function renderSpan(display) {
 function signatureOf(display) {
   return (
     display.nick + "|" + display.small + "|" + display.smallSize + "|" + display.color + "|" + display.glow + "|" +
+    (display.fx ? display.fx.join("+") : "") + "|" +
     display.badges.map((b) => b.text + b.color).join(",")
   );
 }
@@ -2008,6 +2205,7 @@ function paintDisplay(el, st, display, cls) {
   } else if (st.styled) {
     restoreStyle(el, st);
   }
+  applyFx(el, st, display);
   st.sig = signatureOf(display);
   st.ts = Date.now();
 }
@@ -2123,7 +2321,7 @@ function handleElement(el, fromDefer) {
   }
 
   // ③ 全新元素 → 找配对
-  const slot = { key: cls.key, altKey: cls.altKey, el, seenAt: Date.now(), fixed: isFixedDanmaku(el) };
+  const slot = { key: cls.key, altKey: cls.altKey, el, seenAt: Date.now(), fixed: isFixedDanmaku(el), fp: domFingerprint(el) };
   const hit = danmakuMatcher.onElement(slot);
   if (!hit) {
     debugLog("element-wait", { text: cls.text.slice(0, 20), kind: cls.kind });
@@ -2669,6 +2867,7 @@ function handleDanmakuPacket(msg) {
   const hit = danmakuMatcher.onArrival({
     key: identity.matchText || identity.text,
     altKey: identity.text,
+    fp: identity.fp,
     emojiKeys: identity.emoticonKeys,
     ts: identity.ts,
     identity: identity,
@@ -3019,7 +3218,7 @@ function bindRecordsPanel() {
 }
 
 // ===== ui.css =====
-const UI_CSS = "/* ===== 本脚本自有 UI =====\n   2026-11-18 按 Master 圈定重做：跟 B站 主色走、整块浮层偏粉（直播氛围，半透明玻璃，允许轻微发光），\n   展开/收起 200–250ms，尊重 prefers-reduced-motion。\n   约定：正文不铺粉（看直播看久了刺眼）——粉只出现在「玻璃底的粉调 / 强调色 / 轻微粉光 / 语义点」。\n   字号只留 11 / 12 / 13 三档，字重只留 400 / 500 / 600；间距走 4px 格；圆角 8(控件) / 14(浮层)。 */\n\n#bf-panel,\n#bf-rec,\n#bf-card,\n#bf-orb,\n#bf-toast,\n#bf-pin {\n  --bf-bg: rgba(26, 18, 24, 0.88);\n  --bf-bg2: rgba(38, 26, 34, 0.94);\n  --bf-s2: rgba(255, 235, 243, 0.06);\n  --bf-s3: rgba(255, 235, 243, 0.11);\n  --bf-border: rgba(255, 200, 220, 0.13);\n  --bf-border2: rgba(255, 200, 220, 0.22);\n  --bf-text: #f3ecef;\n  --bf-muted: #a797a1;\n  --bf-accent: #fb7299;\n  --bf-accent-ink: #2b0d18;\n  --bf-pink: #fb7299;\n  --bf-fan: #ffd166;\n  --bf-custom: #0011ff;\n  --bf-danger: #ff5c5c;\n  --bf-radius: 14px;\n  --bf-ctl: 8px;\n  --bf-ease: cubic-bezier(0.22, 0.8, 0.3, 1);\n  --bf-dur: 0.22s;\n  font-family: \"PingFang SC\", \"Microsoft YaHei\", system-ui, -apple-system, sans-serif;\n  color: var(--bf-text);\n  -webkit-font-smoothing: antialiased;\n}\n\n#bf-panel[data-bftheme=\"light\"],\n#bf-rec[data-bftheme=\"light\"],\n#bf-card[data-bftheme=\"light\"],\n#bf-pin[data-bftheme=\"light\"] {\n  --bf-bg: rgba(255, 249, 251, 0.94);\n  --bf-bg2: #ffffff;\n  --bf-s2: rgba(70, 20, 40, 0.05);\n  --bf-s3: rgba(70, 20, 40, 0.10);\n  --bf-border: rgba(70, 20, 40, 0.12);\n  --bf-border2: rgba(70, 20, 40, 0.20);\n  --bf-text: #2a1a21;\n  --bf-muted: #7b6a72;\n  --bf-accent: #e2597f;\n  --bf-accent-ink: #ffffff;\n  --bf-pink: #d83b78;\n  --bf-fan: #a97100;\n  --bf-custom: #2438e8;\n}\n\n/* ---------- 画面弹幕上的昵称 ---------- */\n/* 左沿渐隐：弹幕滚出画面时昵称先出界，只剩半截正文贴着容器边缘排成一列，很脏。\n   用 mask 让最后 7% 逐渐透明，观感上是「淡出」而不是「被切断」。 */\n.danmaku-item-container {\n  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 7%);\n  mask-image: linear-gradient(to right, transparent 0, #000 7%);\n}\n\n/* 昵称字号/宽度由 35-decorate.js 的 fitAllNicks 逐帧决定（放不下先缩字、再截断、最后才藏）。 */\n.bf-nick {\n  white-space: nowrap !important;\n  margin-right: 0.25em !important;\n  font-size: 12px;\n  line-height: 1;\n  font-weight: 600;\n  display: inline;\n}\n.bf-nick .bf-b {\n  font-style: normal;\n  margin-right: 0.14em;\n  opacity: 0.95;\n}\n.bf-nick .bf-n {\n  font-weight: 600;\n}\n/* 长昵称（超过 8 字）打的标记：字号由 JS 决定，这里只把亮度压一点，长名字不那么抢正文 */\n.bf-nick.bf-small {\n  opacity: 0.88;\n}\n/* 纯表情弹幕：**不动容器尺寸**（撑开会把表情图放大成巨图），只放开裁剪，\n   把昵称绝对定位到容器左侧外溢出去。 */\n.bili-danmaku-x-dm.bf-emoji-open,\n[class*=\"bili-danmaku-x-dm\"].bf-emoji-open {\n  overflow: visible !important;\n}\n/* 文字弹幕：昵称绝对定位在正文左侧（不占布局宽度，否则会吃掉 B站 给下一条留的 ~70px 间隔）。 */\n.bili-danmaku-x-dm.bf-nick-open,\n[class*=\"bili-danmaku-x-dm\"].bf-nick-open {\n  overflow: visible !important;\n}\n.bili-danmaku-x-dm.bf-emoji-open > .bf-nick,\n[class*=\"bili-danmaku-x-dm\"].bf-emoji-open > .bf-nick {\n  position: absolute !important;\n  right: 100% !important;\n  left: auto !important;\n  top: 50% !important;\n  transform: translateY(-50%) !important;\n  margin: 0 4px 0 0 !important;\n  display: block !important;\n  width: max-content !important;\n}\n.bili-danmaku-x-dm.bf-emoji-open > img,\n[class*=\"bili-danmaku-x-dm\"].bf-emoji-open > img {\n  max-width: 100% !important;\n  max-height: 100% !important;\n}\n.bili-danmaku-x-dm.bf-hit,\n[class*=\"bili-danmaku-x-dm\"].bf-hit {\n  pointer-events: auto !important;\n}\n\n/* ---------- 悬停冻结层 ----------\n   悬停时把那条弹幕「钉」在这里。B站 的弹幕元素是池化复用的，它按自己的计时器\n   回收并复用元素；只有把我们自己的一份 fixed 浮层留住，卡片才不会被连带消失。\n   配色不跟页面主题走：它贴在视频画面上，用深色半透明底 + 浅色字，\n   看起来就是「这条弹幕自己停住了」，而不是压了一块白板。 */\n#bf-pin {\n  position: fixed;\n  z-index: 2147482998;\n  display: inline-flex;\n  align-items: center;\n  padding: 3px 8px;\n  margin: 0;\n  border-radius: 8px;\n  background: rgba(16, 11, 15, 0.78);\n  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.16);\n  pointer-events: none;\n  white-space: nowrap;\n  max-width: calc(100vw - 16px);\n  overflow: visible;\n  font-size: 12px;\n  line-height: 1.35;\n  animation: bf-pin-in 0.14s var(--bf-ease);\n}\n#bf-pin .bf-pin-nick,\n#bf-pin .bf-pin-text {\n  display: inline;\n  white-space: nowrap;\n  font-size: 12px;\n  line-height: 1.35;\n  vertical-align: baseline;\n  color: #fff;\n}\n#bf-pin .bf-pin-nick {\n  margin-right: 4px;\n  font-weight: 600;\n}\n#bf-pin .bf-pin-text {\n  font-weight: 400;\n}\n@keyframes bf-pin-in {\n  from { opacity: 0; transform: scale(0.96); }\n  to { opacity: 1; transform: scale(1); }\n}\n\n/* ---------- 悬浮球 ---------- */\n#bf-orb {\n  position: fixed;\n  z-index: 2147483000;\n  width: 40px;\n  height: 40px;\n  display: grid;\n  place-items: center;\n  border: 0;\n  border-radius: 12px;\n  padding: 0;\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n  box-shadow: 0 8px 20px rgba(251, 114, 153, 0.32);\n  cursor: pointer;\n  touch-action: none;\n  transition: box-shadow var(--bf-dur) var(--bf-ease), transform 0.12s var(--bf-ease);\n}\n#bf-orb svg {\n  width: 21px;\n  height: 21px;\n}\n#bf-orb:hover {\n  box-shadow: 0 8px 26px rgba(251, 114, 153, 0.48);\n}\n#bf-orb:active {\n  transform: scale(0.97);\n}\n\n/* ---------- 设置面板 ---------- */\n#bf-panel {\n  position: fixed;\n  z-index: 2147483001;\n  width: 320px;\n  max-width: calc(100vw - 12px);\n  max-height: 78vh;\n  display: flex;\n  flex-direction: column;\n  background: var(--bf-bg);\n  border: 1px solid var(--bf-border);\n  border-radius: var(--bf-radius);\n  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 200, 220, 0.04);\n  backdrop-filter: blur(16px) saturate(1.15);\n  overflow: hidden;\n  /* 关闭态：visibility + pointer-events 双保险。绝不靠 display 过渡收尾 ——\n     实测 allow-discrete 可能停在 display:flex/opacity:0，面板看不见却继续吞点击。 */\n  visibility: hidden;\n  pointer-events: none;\n  opacity: 0;\n  transform: translateY(-6px) scale(0.985);\n  transition:\n    opacity var(--bf-dur) var(--bf-ease),\n    transform var(--bf-dur) var(--bf-ease),\n    visibility var(--bf-dur) allow-discrete;\n}\n#bf-panel.bf-open {\n  visibility: visible;\n  pointer-events: auto;\n  opacity: 1;\n  transform: none;\n}\n#bf-panel,\n#bf-panel * {\n  box-sizing: border-box;\n}\n.bf-head {\n  height: 44px;\n  flex: 0 0 auto;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 0 8px 0 16px;\n  background: var(--bf-bg2);\n  border-bottom: 1px solid var(--bf-border);\n  cursor: move;\n}\n.bf-title {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  font-size: 13px;\n  font-weight: 600;\n}\n.bf-dot {\n  width: 6px;\n  height: 6px;\n  border-radius: 50%;\n  background: var(--bf-accent);\n  box-shadow: 0 0 8px rgba(251, 114, 153, 0.55);\n}\n.bf-dot.bf-pink {\n  background: var(--bf-pink);\n  box-shadow: 0 0 8px rgba(251, 114, 153, 0.55);\n}\n.bf-hright {\n  display: flex;\n  align-items: center;\n  gap: 4px;\n}\n.bf-ver {\n  font-size: 11px;\n  color: var(--bf-muted);\n  font-variant-numeric: tabular-nums;\n}\n.bf-x {\n  width: 28px;\n  height: 28px;\n  display: grid;\n  place-items: center;\n  border: 0;\n  border-radius: var(--bf-ctl);\n  background: transparent;\n  color: var(--bf-muted);\n  cursor: pointer;\n  font-size: 13px;\n}\n.bf-x:hover {\n  background: var(--bf-s3);\n  color: var(--bf-text);\n}\n.bf-body {\n  padding: 8px 16px 12px;\n  overflow: auto;\n  overscroll-behavior: contain;\n}\n.bf-sec {\n  padding: 12px 0;\n  border-bottom: 1px solid var(--bf-border);\n}\n.bf-sec:last-child {\n  border-bottom: 0;\n}\n.bf-row {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  min-height: 36px;\n  margin: 0;\n  font-size: 13px;\n  cursor: pointer;\n}\n.bf-lab {\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n  min-width: 0;\n}\n.bf-sub {\n  font-size: 11px;\n  color: var(--bf-muted);\n  font-weight: 400;\n}\n.bf-right {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  flex: 0 0 auto;\n}\n.bf-in {\n  height: 32px;\n  width: 108px;\n  padding: 0 10px;\n  color: var(--bf-text);\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  outline: none;\n  font-size: 12px;\n  font-family: inherit;\n  transition: border-color 0.16s var(--bf-ease);\n}\n.bf-in:focus {\n  border-color: var(--bf-accent);\n}\n.bf-in.bf-num {\n  width: 96px;\n  font-variant-numeric: tabular-nums;\n}\n.bf-in.bf-mini {\n  width: 48px;\n  text-align: center;\n}\n/* ---------- 分段按钮（API 查询范围这类二选一） ----------\n   原来用原生 <select>：展开弹层由系统绘制，深色下选中项是系统浅蓝、浅色下白字白底，\n   option:checked / appearance:base-select 全压不住（实测）。自绘弹层又会透出下层控件。\n   只有两个选项本来就不该用下拉 —— 改用分段按钮，没有弹层就没有这些问题。 */\n/* 标签在上、分段按钮占满整行：两个选项并排放在 320px 面板里，跟标签同行必然被裁 */\n.bf-row-sel {\n  flex-direction: column;\n  align-items: stretch;\n  gap: 8px;\n  padding: 8px 0 4px;\n  cursor: default;\n}\n.bf-seg {\n  display: flex;\n  width: 100%;\n  height: 32px;\n  padding: 2px;\n  gap: 2px;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n}\n.bf-seg button {\n  flex: 1 1 0;\n  min-width: 0;\n  height: 100%;\n  padding: 0 8px;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  border: 0;\n  border-radius: 6px;\n  background: transparent;\n  color: var(--bf-muted);\n  font-size: 12px;\n  font-family: inherit;\n  cursor: pointer;\n  white-space: nowrap;\n  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);\n}\n.bf-seg button:hover {\n  color: var(--bf-text);\n  background: var(--bf-s3);\n}\n.bf-seg button[data-on=\"1\"] {\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n  font-weight: 600;\n}\n.bf-seg button[data-on=\"1\"]:hover {\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n}\n\n.bf-color {\n  width: 36px;\n  height: 28px;\n  padding: 2px;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  cursor: pointer;\n}\n.bf-field {\n  padding: 8px 0 4px;\n}\n.bf-ta {\n  width: 100%;\n  min-height: 64px;\n  margin-top: 8px;\n  padding: 8px 10px;\n  resize: vertical;\n  color: var(--bf-text);\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  outline: none;\n  font-size: 12px;\n  line-height: 1.5;\n  font-family: inherit;\n  transition: border-color 0.16s var(--bf-ease);\n}\n.bf-ta:focus {\n  border-color: var(--bf-accent);\n}\n.bf-sw {\n  position: relative;\n  width: 36px;\n  height: 20px;\n  min-width: 36px;\n  cursor: pointer;\n}\n.bf-sw input {\n  position: absolute;\n  opacity: 0;\n  inset: 0;\n  margin: 0;\n  cursor: pointer;\n}\n.bf-track {\n  position: absolute;\n  inset: 0;\n  border-radius: var(--bf-ctl);\n  background: var(--bf-s3);\n  transition: background var(--bf-dur) var(--bf-ease);\n}\n.bf-track::before {\n  content: \"\";\n  position: absolute;\n  width: 16px;\n  height: 16px;\n  left: 2px;\n  top: 2px;\n  border-radius: 50%;\n  background: #fff;\n  transition: transform var(--bf-dur) var(--bf-ease);\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);\n}\n.bf-sw input:checked + .bf-track {\n  background: var(--bf-accent);\n}\n.bf-sw input:checked + .bf-track::before {\n  transform: translateX(16px);\n}\n.bf-expand {\n  width: 100%;\n  height: 32px;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 0 4px;\n  border: 0;\n  background: transparent;\n  color: var(--bf-muted);\n  font-size: 12px;\n  cursor: pointer;\n  font-family: inherit;\n}\n.bf-expand:hover {\n  color: var(--bf-text);\n}\n.bf-more {\n  display: none;\n}\n.bf-more.bf-open {\n  display: block;\n}\n.bf-grp {\n  padding: 8px 0 4px;\n  border-top: 1px solid var(--bf-border);\n}\n.bf-gt {\n  font-size: 11px;\n  font-weight: 600;\n  color: var(--bf-accent);\n  margin: 0 0 8px;\n}\n.bf-actions {\n  display: flex;\n  gap: 8px;\n  flex-wrap: wrap;\n  margin-top: 8px;\n}\n.bf-btn {\n  height: 30px;\n  padding: 0 12px;\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  background: var(--bf-s2);\n  color: var(--bf-text);\n  font-size: 12px;\n  cursor: pointer;\n  font-family: inherit;\n  transition: border-color 0.16s var(--bf-ease), background 0.16s var(--bf-ease);\n}\n.bf-btn:hover {\n  border-color: var(--bf-accent);\n}\n.bf-btn.bf-danger:hover {\n  border-color: var(--bf-danger);\n  color: var(--bf-danger);\n}\n.bf-status {\n  flex: 0 0 auto;\n  position: relative;\n  padding: 8px 26px 8px 16px;\n  border-top: 1px solid var(--bf-border);\n  background: var(--bf-bg2);\n  color: var(--bf-muted);\n  font-size: 11px;\n  font-variant-numeric: tabular-nums;\n  white-space: nowrap;\n  overflow: hidden;\n}\n.bf-stext {\n  display: block;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n/* 右下角缩放手柄：双层折角（外层大括号 + 内层小括号），一眼能认出是可拖拽缩放，\n   不用斜线（斜线在小尺寸下像渲染划痕，Master 2026-11-18 反馈过） */\n.bf-grip {\n  position: absolute;\n  right: 4px;\n  bottom: 4px;\n  width: 15px;\n  height: 15px;\n  cursor: nwse-resize;\n  touch-action: none;\n  color: var(--bf-muted);\n  opacity: 0.85;\n  transition: opacity 0.15s ease, color 0.15s ease;\n}\n.bf-grip::before,\n.bf-grip::after {\n  content: \"\";\n  position: absolute;\n  right: 0;\n  bottom: 0;\n  border-right: 1.5px solid currentColor;\n  border-bottom: 1.5px solid currentColor;\n  border-radius: 0 0 3px 0;\n}\n.bf-grip::before { width: 15px; height: 15px; }\n.bf-grip::after { width: 8px; height: 8px; }\n.bf-grip:hover { opacity: 1; color: var(--bf-accent); }\n\n/* ---------- 记录面板 ---------- */\n#bf-rec {\n  position: fixed;\n  z-index: 2147483001;\n  width: 460px;\n  max-width: calc(100vw - 12px);\n  max-height: 74vh;\n  display: flex;\n  flex-direction: column;\n  background: var(--bf-bg);\n  border: 1px solid var(--bf-border);\n  border-radius: var(--bf-radius);\n  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 200, 220, 0.04);\n  backdrop-filter: blur(16px) saturate(1.15);\n  overflow: hidden;\n  visibility: hidden;\n  pointer-events: none;\n  opacity: 0;\n  transform: translateY(-6px) scale(0.985);\n  transition:\n    opacity var(--bf-dur) var(--bf-ease),\n    transform var(--bf-dur) var(--bf-ease),\n    visibility var(--bf-dur) allow-discrete;\n}\n#bf-rec.bf-open {\n  visibility: visible;\n  pointer-events: auto;\n  opacity: 1;\n  transform: none;\n}\n#bf-rec,\n#bf-rec * {\n  box-sizing: border-box;\n}\n.bf-count {\n  font-size: 11px;\n  color: var(--bf-muted);\n  font-weight: 400;\n}\n.bf-count b {\n  color: var(--bf-text);\n  font-weight: 600;\n}\n.bf-rectool {\n  padding: 12px 14px;\n  border-bottom: 1px solid var(--bf-border);\n  flex: 0 0 auto;\n}\n.bf-filters {\n  display: flex;\n  gap: 8px;\n  margin-bottom: 12px;\n  flex-wrap: wrap;\n}\n.bf-rchip {\n  height: 28px;\n  padding: 0 10px;\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n  border-radius: var(--bf-ctl);\n  border: 1px solid var(--bf-border2);\n  background: transparent;\n  color: var(--bf-muted);\n  font-size: 11px;\n  cursor: pointer;\n  user-select: none;\n  font-family: inherit;\n  transition: background 0.16s var(--bf-ease), border-color 0.16s var(--bf-ease), color 0.16s var(--bf-ease);\n}\n.bf-rchip[data-on=\"1\"] {\n  color: var(--bf-text);\n  background: var(--bf-s2);\n  border-color: var(--bf-border);\n}\n.bf-rdot {\n  width: 6px;\n  height: 6px;\n  border-radius: 50%;\n}\n.bf-rd-follow {\n  background: var(--bf-pink);\n}\n.bf-rd-fan {\n  background: var(--bf-fan);\n}\n.bf-rd-custom {\n  background: var(--bf-custom);\n}\n.bf-rd-kw {\n  background: var(--bf-danger);\n}\n.bf-sbar {\n  display: flex;\n  gap: 8px;\n  align-items: center;\n}\n.bf-sf {\n  position: relative;\n  flex: 1;\n  display: flex;\n  align-items: center;\n}\n.bf-sf input {\n  width: 100%;\n  height: 32px;\n  padding: 0 28px 0 10px;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  color: var(--bf-text);\n  outline: none;\n  font-size: 12px;\n  font-family: inherit;\n  transition: border-color 0.16s var(--bf-ease);\n}\n.bf-sf input:focus {\n  border-color: var(--bf-accent);\n}\n.bf-sf.bf-invalid input {\n  border-color: var(--bf-danger);\n}\n.bf-clearq {\n  position: absolute;\n  right: 4px;\n  width: 20px;\n  height: 20px;\n  display: none;\n  place-items: center;\n  border: 0;\n  background: transparent;\n  color: var(--bf-muted);\n  cursor: pointer;\n  border-radius: 6px;\n  font-size: 11px;\n}\n.bf-sf.bf-has .bf-clearq {\n  display: grid;\n}\n.bf-rmode {\n  display: flex;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  overflow: hidden;\n  height: 32px;\n}\n.bf-rmode button {\n  height: 100%;\n  padding: 0 10px;\n  border: 0;\n  background: transparent;\n  color: var(--bf-muted);\n  cursor: pointer;\n  font-size: 11px;\n  font-family: inherit;\n  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);\n}\n.bf-rmode button[data-on=\"1\"] {\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n  font-weight: 600;\n}\n.bf-toolrow {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  margin-top: 8px;\n  gap: 8px;\n}\n.bf-acts {\n  display: flex;\n  gap: 4px;\n}\n.bf-linkbtn {\n  height: 28px;\n  padding: 0 10px;\n  border: 0;\n  background: transparent;\n  color: var(--bf-muted);\n  cursor: pointer;\n  font-size: 11px;\n  border-radius: 6px;\n  font-family: inherit;\n  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);\n}\n.bf-linkbtn:hover {\n  background: var(--bf-s3);\n  color: var(--bf-text);\n}\n.bf-reclist {\n  flex: 1 1 auto;\n  overflow: auto;\n  overscroll-behavior: contain;\n  padding: 4px 6px 8px;\n}\n.bf-ritem {\n  position: relative;\n  padding: 10px 8px;\n  border-bottom: 1px solid var(--bf-border);\n}\n.bf-ritem:last-child {\n  border-bottom: 0;\n}\n.bf-ritem:hover {\n  background: var(--bf-s2);\n}\n.bf-rmeta {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  font-size: 11px;\n  color: var(--bf-muted);\n  margin-bottom: 4px;\n}\n.bf-rtime {\n  font-variant-numeric: tabular-nums;\n}\n.bf-rtag {\n  padding: 0 6px;\n  border-radius: 6px;\n  font-size: 11px;\n  font-weight: 500;\n  line-height: 16px;\n}\n.bf-rt-follow {\n  color: var(--bf-pink);\n  background: rgba(251, 114, 153, 0.16);\n}\n.bf-rt-fan {\n  color: var(--bf-fan);\n  background: rgba(255, 209, 102, 0.16);\n}\n.bf-rt-custom {\n  color: #8b93ff;\n  background: rgba(0, 17, 255, 0.22);\n}\n.bf-rt-kw {\n  color: var(--bf-danger);\n  background: rgba(255, 92, 92, 0.16);\n}\n.bf-croomlink {\n  color: var(--bf-accent);\n  text-decoration: none;\n}\n.bf-rline {\n  font-size: 13px;\n  line-height: 1.55;\n  padding-right: 48px;\n}\n.bf-rname {\n  color: var(--bf-fan);\n  font-weight: 600;\n  text-decoration: none;\n}\n#bf-rec[data-bftheme=\"light\"] .bf-rname {\n  color: #9a6306;\n}\n.bf-rroomtitle {\n  font-size: 11px;\n  color: var(--bf-muted);\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.bf-ritem mark {\n  background: rgba(251, 114, 153, 0.28);\n  color: inherit;\n  border-radius: 3px;\n  padding: 0 1px;\n}\n.bf-rcopy,\n.bf-rdel {\n  position: absolute;\n  top: 8px;\n  width: 26px;\n  height: 24px;\n  display: none;\n  place-items: center;\n  border: 0;\n  border-radius: 6px;\n  background: var(--bf-s2);\n  color: var(--bf-muted);\n  cursor: pointer;\n  font-size: 11px;\n}\n.bf-rcopy {\n  right: 4px;\n}\n.bf-rdel {\n  right: 32px;\n}\n.bf-ritem:hover .bf-rcopy,\n.bf-ritem:hover .bf-rdel {\n  display: grid;\n}\n.bf-rdel:hover {\n  color: var(--bf-danger);\n}\n.bf-rchk {\n  position: absolute;\n  left: 8px;\n  top: 50%;\n  transform: translateY(-50%);\n  width: 18px;\n  height: 18px;\n  display: none;\n  align-items: center;\n  justify-content: center;\n  border: 1.5px solid var(--bf-border2);\n  border-radius: 4px;\n  background: transparent;\n  color: transparent;\n  cursor: pointer;\n  font-size: 11px;\n  padding: 0;\n}\n.bf-ritem.bf-rsel {\n  padding-left: 32px;\n}\n.bf-ritem.bf-rsel .bf-rchk {\n  display: flex;\n}\n.bf-rchk.bf-on {\n  background: var(--bf-accent);\n  border-color: var(--bf-accent);\n  color: var(--bf-accent-ink);\n}\n.bf-selbar {\n  display: none;\n  align-items: center;\n  gap: 8px;\n  padding: 6px 10px;\n  margin-top: 8px;\n  border-radius: var(--bf-ctl);\n  background: var(--bf-s2);\n}\n.bf-selbar.bf-show {\n  display: flex;\n}\n.bf-selbar .bf-count {\n  flex: 1;\n}\n.bf-empty {\n  padding: 40px 20px;\n  text-align: center;\n  color: var(--bf-muted);\n  font-size: 12px;\n  line-height: 1.8;\n}\n.bf-empty span {\n  font-size: 11px;\n}\n\n/* ---------- 身份卡 ---------- */\n#bf-card {\n  position: fixed;\n  z-index: 2147483002;\n  width: 280px;\n  display: block;\n  background: var(--bf-bg);\n  border: 1px solid var(--bf-border);\n  border-radius: var(--bf-radius);\n  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 200, 220, 0.05);\n  backdrop-filter: blur(16px) saturate(1.15);\n  overflow: hidden;\n  pointer-events: auto;\n  visibility: hidden;\n  opacity: 0;\n  transform: scale(0.97);\n  transition:\n    opacity 0.2s var(--bf-ease),\n    transform 0.2s var(--bf-ease),\n    visibility 0.2s allow-discrete;\n}\n#bf-card.bf-open {\n  visibility: visible;\n  opacity: 1;\n  transform: none;\n}\n.bf-cbody {\n  padding: 12px 14px 10px;\n  font-size: 12px;\n}\n.bf-chead {\n  display: flex;\n  gap: 10px;\n  align-items: center;\n}\n.bf-cface {\n  width: 44px;\n  height: 44px;\n  border-radius: 50%;\n  object-fit: cover;\n  flex: 0 0 auto;\n  background: var(--bf-s3);\n}\n.bf-cface-ph {\n  background: var(--bf-s3);\n}\n.bf-cwho {\n  min-width: 0;\n  flex: 1;\n}\n.bf-cname {\n  font-size: 13px;\n  font-weight: 600;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.bf-cuid {\n  font-size: 11px;\n  color: var(--bf-muted);\n  font-variant-numeric: tabular-nums;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n}\n.bf-cverify {\n  color: var(--bf-fan);\n  border: 1px solid rgba(255, 209, 102, 0.4);\n  border-radius: 4px;\n  padding: 0 4px;\n  font-size: 11px;\n}\n.bf-cbadge {\n  font-size: 11px;\n  padding: 1px 6px;\n  border-radius: 6px;\n  flex: 0 0 auto;\n}\n.bf-cguard {\n  color: #ff9f43;\n  background: rgba(255, 159, 67, 0.16);\n}\n.bf-csign {\n  margin: 8px 0;\n  font-size: 11px;\n  color: var(--bf-muted);\n  line-height: 1.5;\n  max-height: 34px;\n  overflow: hidden;\n}\n.bf-cstats {\n  border-top: 1px solid var(--bf-border);\n  padding-top: 8px;\n}\n.bf-crow {\n  display: flex;\n  justify-content: space-between;\n  gap: 10px;\n  font-size: 12px;\n  line-height: 1.9;\n}\n.bf-clabel {\n  color: var(--bf-muted);\n}\n.bf-cval {\n  font-variant-numeric: tabular-nums;\n}\n.bf-cmuted {\n  color: var(--bf-muted);\n}\n.bf-cvip {\n  color: var(--bf-pink);\n  font-size: 11px;\n}\n.bf-cfoot {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n  margin-top: 8px;\n  padding-top: 8px;\n  border-top: 1px solid var(--bf-border);\n}\n.bf-cmedal {\n  font-size: 11px;\n}\n.bf-clink {\n  font-size: 12px;\n  color: var(--bf-accent);\n  text-decoration: none;\n}\n.bf-clink:hover {\n  text-decoration: underline;\n}\n\n/* ---------- toast ---------- */\n#bf-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 56px;\n  transform: translateX(-50%) translateY(8px);\n  opacity: 0;\n  z-index: 2147483003;\n  padding: 10px 16px;\n  border-radius: 12px;\n  background: var(--bf-bg2);\n  border: 1px solid var(--bf-border2);\n  color: var(--bf-text);\n  font-size: 12px;\n  pointer-events: none;\n  transition: opacity var(--bf-dur) var(--bf-ease), transform var(--bf-dur) var(--bf-ease);\n  backdrop-filter: blur(12px);\n}\n#bf-toast.bf-show {\n  opacity: 1;\n  transform: translateX(-50%) translateY(0);\n}\n#bf-toast[data-kind=\"enter\"] {\n  border-color: rgba(251, 114, 153, 0.5);\n}\n\n/* 拖拽期间整页不选字；标题栏本身也不该被选中 */\n.bf-dragging,\n.bf-dragging * {\n  user-select: none !important;\n  -webkit-user-select: none !important;\n  cursor: grabbing !important;\n}\n.bf-head {\n  user-select: none;\n  -webkit-user-select: none;\n}\n\n/* 滚动条：系统默认的浅色条在玻璃面板上同样割裂 */\n/* ---------- 滚动条 ----------\n   Chromium 156 实测：只要样式里出现 ::-webkit-scrollbar，就退回「传统滚动条」渲染，\n   Windows 会画出上下 ▲▼ 按钮；而 ::-webkit-scrollbar-button{display:none} 在这个版本\n   上不生效（A/B 强制染绿都没出现绿色像素）。标准属性 scrollbar-width/color 走的是现代细条，\n   但没法给 thumb 精确上色/加圆角。\n   结论：**原生滚动条整体隐藏，自己画一根指示条**（.bf-sbthumb），彻底不依赖 OS 渲染。 */\n#bf-panel .bf-body,\n#bf-rec .bf-reclist {\n  scrollbar-width: none;\n  -ms-overflow-style: none;\n}\n#bf-panel .bf-body::-webkit-scrollbar,\n#bf-rec .bf-reclist::-webkit-scrollbar {\n  width: 0;\n  height: 0;\n  display: none;\n}\n.bf-sbthumb {\n  position: absolute;\n  right: 4px;\n  width: 6px;\n  border-radius: 999px;\n  background: rgba(251, 114, 153, 0.55);\n  opacity: 0;\n  pointer-events: none;\n  transition: opacity 0.18s var(--bf-ease);\n  will-change: transform, height;\n}\n.bf-sbthumb.bf-sbthumb-on {\n  opacity: 1;\n}\n.bf-sbthumb.bf-sbthumb-fade {\n  opacity: 0.35;\n}\n#bf-panel[data-bftheme=\"light\"] .bf-sbthumb,\n#bf-rec[data-bftheme=\"light\"] .bf-sbthumb {\n  background: rgba(226, 89, 127, 0.5);\n}\n/* 文本框自己的滚动条也藏掉（内容少时几乎不出现） */\n.bf-ta {\n  scrollbar-width: thin;\n  scrollbar-color: rgba(251, 114, 153, 0.45) transparent;\n}\n\n@media (prefers-reduced-motion: reduce) {\n  #bf-panel,\n  #bf-rec,\n  #bf-card,\n  #bf-toast,\n  #bf-orb,\n  .bf-track,\n  .bf-track::before,\n  .bf-in,\n  .bf-ta,\n  .bf-btn,\n  .bf-rchip,\n  .bf-rmode button,\n  .bf-linkbtn {\n    transition: none !important;\n  }\n}\n\n/* ---------- 自绘下拉 ----------\n   原生 <select> 的展开弹层由浏览器/系统绘制：深色主题下选中项是系统浅蓝、浅色主题下是白底，\n   option:checked 的 background 会被 UA 高亮盖掉（appearance:base-select 也压不住，实测）。\n   所以这一项改成 button + 挂在 body 上的 listbox，颜色全部走主题 token。 */\n.bf-row-sel {\n  align-items: flex-start;\n  padding: 4px 0;\n}\n.bf-dd {\n  position: relative;\n  flex: 0 0 auto;\n  display: inline-block;\n}\n.bf-dd-btn {\n  display: inline-flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n  min-width: 136px;\n  height: 32px;\n  padding: 0 10px;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  color: var(--bf-text);\n  font-size: 12px;\n  font-family: inherit;\n  cursor: pointer;\n  transition: border-color 0.16s var(--bf-ease), background 0.16s var(--bf-ease);\n}\n.bf-dd-btn:hover {\n  background: var(--bf-s3);\n}\n.bf-dd.bf-open .bf-dd-btn,\n.bf-dd-btn:focus-visible {\n  border-color: var(--bf-accent);\n  outline: none;\n}\n.bf-dd-val {\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.bf-dd-caret {\n  flex: 0 0 auto;\n  color: var(--bf-muted);\n  transition: transform 0.18s var(--bf-ease);\n}\n.bf-dd.bf-open .bf-dd-caret {\n  transform: rotate(180deg);\n}\n/* 菜单挂在 body 上（面板 overflow:hidden 会把它裁掉），所以这里必须自带全部颜色 */\n.bf-dd-menu {\n  position: fixed;\n  z-index: 2147483004;\n  padding: 4px;\n  background: #241a21;\n  border: 1px solid rgba(255, 200, 220, 0.22);\n  border-radius: 10px;\n  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);\n  backdrop-filter: blur(16px) saturate(1.15);\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n  animation: bf-dd-in 0.16s cubic-bezier(0.22, 0.8, 0.3, 1);\n}\n@keyframes bf-dd-in {\n  from {\n    opacity: 0;\n    transform: translateY(-4px);\n  }\n}\n.bf-dd-menu .bf-dd-opt {\n  display: block;\n  width: 100%;\n  padding: 8px 10px;\n  border: 0;\n  border-radius: 6px;\n  background: transparent;\n  color: #f3ecef;\n  font-size: 12px;\n  font-family: inherit;\n  text-align: left;\n  cursor: pointer;\n  white-space: nowrap;\n}\n.bf-dd-menu .bf-dd-opt:hover {\n  background: rgba(255, 235, 243, 0.12);\n}\n.bf-dd-menu .bf-dd-opt.bf-on {\n  background: #fb7299;\n  color: #2b0d18;\n  font-weight: 600;\n}\nbody.bf-theme-light .bf-dd-menu {\n  background: #ffffff;\n  border-color: rgba(70, 20, 40, 0.18);\n  box-shadow: 0 16px 36px rgba(70, 20, 40, 0.18);\n}\nbody.bf-theme-light .bf-dd-menu .bf-dd-opt {\n  color: #2a1a21;\n}\nbody.bf-theme-light .bf-dd-menu .bf-dd-opt:hover {\n  background: rgba(70, 20, 40, 0.07);\n}\nbody.bf-theme-light .bf-dd-menu .bf-dd-opt.bf-on {\n  background: #e2597f;\n  color: #ffffff;\n}\n@media (prefers-reduced-motion: reduce) {\n  .bf-dd-menu {\n    animation: none;\n  }\n  .bf-dd-caret {\n    transition: none;\n  }\n}\n";
+const UI_CSS = "/* ===== 本脚本自有 UI =====\n   2026-11-18 按 Master 圈定重做：跟 B站 主色走、整块浮层偏粉（直播氛围，半透明玻璃，允许轻微发光），\n   展开/收起 200–250ms，尊重 prefers-reduced-motion。\n   约定：正文不铺粉（看直播看久了刺眼）——粉只出现在「玻璃底的粉调 / 强调色 / 轻微粉光 / 语义点」。\n   字号只留 11 / 12 / 13 三档，字重只留 400 / 500 / 600；间距走 4px 格；圆角 8(控件) / 14(浮层)。 */\n\n#bf-panel,\n#bf-rec,\n#bf-card,\n#bf-orb,\n#bf-toast,\n#bf-pin {\n  --bf-bg: rgba(26, 18, 24, 0.88);\n  --bf-bg2: rgba(38, 26, 34, 0.94);\n  --bf-s2: rgba(255, 235, 243, 0.06);\n  --bf-s3: rgba(255, 235, 243, 0.11);\n  --bf-border: rgba(255, 200, 220, 0.13);\n  --bf-border2: rgba(255, 200, 220, 0.22);\n  --bf-text: #f3ecef;\n  --bf-muted: #a797a1;\n  --bf-accent: #fb7299;\n  --bf-accent-ink: #2b0d18;\n  --bf-pink: #fb7299;\n  --bf-fan: #ffd166;\n  --bf-custom: #22d3ee;\n  --bf-danger: #ff5c5c;\n  --bf-radius: 14px;\n  --bf-ctl: 8px;\n  --bf-ease: cubic-bezier(0.22, 0.8, 0.3, 1);\n  --bf-dur: 0.22s;\n  font-family: \"PingFang SC\", \"Microsoft YaHei\", system-ui, -apple-system, sans-serif;\n  color: var(--bf-text);\n  -webkit-font-smoothing: antialiased;\n}\n\n#bf-panel[data-bftheme=\"light\"],\n#bf-rec[data-bftheme=\"light\"],\n#bf-card[data-bftheme=\"light\"],\n#bf-pin[data-bftheme=\"light\"] {\n  --bf-bg: rgba(255, 249, 251, 0.94);\n  --bf-bg2: #ffffff;\n  --bf-s2: rgba(70, 20, 40, 0.05);\n  --bf-s3: rgba(70, 20, 40, 0.10);\n  --bf-border: rgba(70, 20, 40, 0.12);\n  --bf-border2: rgba(70, 20, 40, 0.20);\n  --bf-text: #2a1a21;\n  --bf-muted: #7b6a72;\n  --bf-accent: #e2597f;\n  --bf-accent-ink: #ffffff;\n  --bf-pink: #d83b78;\n  --bf-fan: #a97100;\n  --bf-custom: #0e7490;\n}\n\n/* ---------- 画面弹幕上的昵称 ---------- */\n/* 左沿渐隐：弹幕滚出画面时昵称先出界，只剩半截正文贴着容器边缘排成一列，很脏。\n   用 mask 让最后 7% 逐渐透明，观感上是「淡出」而不是「被切断」。 */\n.danmaku-item-container {\n  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 7%);\n  mask-image: linear-gradient(to right, transparent 0, #000 7%);\n}\n\n/* 昵称字号/宽度由 35-decorate.js 的 fitAllNicks 逐帧决定（放不下先缩字、再截断、最后才藏）。 */\n.bf-nick {\n  white-space: nowrap !important;\n  margin-right: 0.25em !important;\n  font-size: 12px;\n  line-height: 1;\n  font-weight: 600;\n  display: inline;\n}\n.bf-nick .bf-b {\n  font-style: normal;\n  margin-right: 0.14em;\n  opacity: 0.95;\n}\n.bf-nick .bf-n {\n  font-weight: 600;\n}\n/* 长昵称（超过 8 字）打的标记：字号由 JS 决定，这里只把亮度压一点，长名字不那么抢正文 */\n.bf-nick.bf-small {\n  opacity: 0.88;\n}\n/* 纯表情弹幕：**不动容器尺寸**（撑开会把表情图放大成巨图），只放开裁剪，\n   把昵称绝对定位到容器左侧外溢出去。 */\n.bili-danmaku-x-dm.bf-emoji-open,\n[class*=\"bili-danmaku-x-dm\"].bf-emoji-open {\n  overflow: visible !important;\n}\n/* 文字弹幕：昵称绝对定位在正文左侧（不占布局宽度，否则会吃掉 B站 给下一条留的 ~70px 间隔）。 */\n.bili-danmaku-x-dm.bf-nick-open,\n[class*=\"bili-danmaku-x-dm\"].bf-nick-open {\n  overflow: visible !important;\n}\n.bili-danmaku-x-dm.bf-emoji-open > .bf-nick,\n[class*=\"bili-danmaku-x-dm\"].bf-emoji-open > .bf-nick {\n  position: absolute !important;\n  right: 100% !important;\n  left: auto !important;\n  top: 50% !important;\n  transform: translateY(-50%) !important;\n  margin: 0 4px 0 0 !important;\n  display: block !important;\n  width: max-content !important;\n}\n.bili-danmaku-x-dm.bf-emoji-open > img,\n[class*=\"bili-danmaku-x-dm\"].bf-emoji-open > img {\n  max-width: 100% !important;\n  max-height: 100% !important;\n}\n.bili-danmaku-x-dm.bf-hit,\n[class*=\"bili-danmaku-x-dm\"].bf-hit {\n  pointer-events: auto !important;\n}\n\n/* ---------- 高光效果层（v2.6）----------\n   挂在弹幕元素内部、z-index:-1：画在正文后面、视频前面（弹幕元素自带 transform，自成层叠上下文）。\n   左边界 = 昵称实测宽（--bf-nw，JS 写）+ 4px 昵称间距 + 6px 内边距 → 框把「昵称 + 正文」一起包住。\n   绝对定位不占布局宽度，B站 的滚动速度不变。固定弹幕昵称翻到右侧时加 .bf-fx-r 跟着翻。 */\n.bf-fx {\n  position: absolute !important;\n  z-index: -1 !important;\n  top: -3px;\n  bottom: -3px;\n  left: calc(-1 * (var(--bf-nw, 0px) + 10px));\n  right: -5px;\n  border-radius: 6px;\n  box-sizing: border-box;\n  pointer-events: none !important;\n  display: block !important;\n  margin: 0 !important;\n  padding: 0 !important;\n}\n.bf-fx.bf-fx-r {\n  left: -5px;\n  right: calc(-1 * (var(--bf-nw, 0px) + 10px));\n}\n/* 底牌：档位色混深色压底，亮场/花哨画面上也立得住；左侧 3px 色条是「中途看过来」的常驻识别点。\n   原生「自己发的弹幕」是白色细框，底牌是实心色块，语义上撞不到一起。 */\n.bf-fx.bf-fx-card {\n  /* ★ 档位色只占 22%：正文本身也是档位色，底牌混得太浓会变成「蓝字压蓝底」（无头截图实测） */\n  background: color-mix(in srgb, var(--bf-c) 22%, rgba(0, 0, 0, 0.72));\n  box-shadow: inset 3px 0 0 var(--bf-c), 0 0 0 1px color-mix(in srgb, var(--bf-c) 55%, transparent);\n}\n/* 绕行光段：两段光沿圆角框转圈；底下垫一道深色粗描边，亮场上才看得见 */\n.bf-fx .bf-fx-orb {\n  position: absolute;\n  inset: 0;\n  width: 100%;\n  height: 100%;\n  overflow: visible;\n  display: block;\n}\n.bf-fx .bf-fx-orb rect {\n  width: calc(100% - 2px);\n  height: calc(100% - 2px);\n  fill: none;\n  stroke-dasharray: 18 32;\n  animation: bf-orb 1.6s linear infinite;\n}\n.bf-fx .bf-fx-orb .o1 {\n  stroke: rgba(0, 0, 0, 0.7);\n  stroke-width: 5;\n}\n.bf-fx .bf-fx-orb .o2 {\n  stroke: var(--bf-c);\n  stroke-width: 2.5;\n  stroke-linecap: round;\n}\n@keyframes bf-orb {\n  to {\n    stroke-dashoffset: -100;\n  }\n}\n/* 入场涟漪：出现那一刻向外扩两圈就收（注意力抓的是「突然出现」，持续动效会被习惯掉） */\n.bf-fx .bf-fx-rip {\n  position: absolute;\n  inset: 0;\n  border: 2px solid var(--bf-c);\n  border-radius: inherit;\n  box-sizing: border-box;\n  opacity: 0;\n  animation: bf-rip 0.7s cubic-bezier(0.2, 0.7, 0.3, 1) 2;\n}\n@keyframes bf-rip {\n  0% {\n    transform: scale(1);\n    opacity: 1;\n  }\n  100% {\n    transform: scale(1.22, 1.9);\n    opacity: 0;\n  }\n}\n@media (prefers-reduced-motion: reduce) {\n  .bf-fx .bf-fx-orb rect,\n  .bf-fx .bf-fx-rip {\n    animation: none;\n  }\n}\n\n/* 面板里的「多选」分段按钮（高光效果）：沿用 .bf-seg 外观，可同时点亮多个 */\n.bf-seg.bf-multi button[data-on=\"1\"] {\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n  font-weight: 600;\n}\n\n/* ---------- 悬停冻结层 ----------\n   悬停时把那条弹幕「钉」在这里。B站 的弹幕元素是池化复用的，它按自己的计时器\n   回收并复用元素；只有把我们自己的一份 fixed 浮层留住，卡片才不会被连带消失。\n   配色不跟页面主题走：它贴在视频画面上，用深色半透明底 + 浅色字，\n   看起来就是「这条弹幕自己停住了」，而不是压了一块白板。 */\n#bf-pin {\n  position: fixed;\n  z-index: 2147482998;\n  display: inline-flex;\n  align-items: center;\n  padding: 3px 8px;\n  margin: 0;\n  border-radius: 8px;\n  background: rgba(16, 11, 15, 0.78);\n  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.16);\n  pointer-events: none;\n  white-space: nowrap;\n  max-width: calc(100vw - 16px);\n  overflow: visible;\n  font-size: 12px;\n  line-height: 1.35;\n  animation: bf-pin-in 0.14s var(--bf-ease);\n}\n#bf-pin .bf-pin-nick,\n#bf-pin .bf-pin-text {\n  display: inline;\n  white-space: nowrap;\n  font-size: 12px;\n  line-height: 1.35;\n  vertical-align: baseline;\n  color: #fff;\n}\n#bf-pin .bf-pin-nick {\n  margin-right: 4px;\n  font-weight: 600;\n}\n#bf-pin .bf-pin-text {\n  font-weight: 400;\n}\n@keyframes bf-pin-in {\n  from { opacity: 0; transform: scale(0.96); }\n  to { opacity: 1; transform: scale(1); }\n}\n\n/* ---------- 悬浮球 ---------- */\n#bf-orb {\n  position: fixed;\n  z-index: 2147483000;\n  width: 40px;\n  height: 40px;\n  display: grid;\n  place-items: center;\n  border: 0;\n  border-radius: 12px;\n  padding: 0;\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n  box-shadow: 0 8px 20px rgba(251, 114, 153, 0.32);\n  cursor: pointer;\n  touch-action: none;\n  transition: box-shadow var(--bf-dur) var(--bf-ease), transform 0.12s var(--bf-ease);\n}\n#bf-orb svg {\n  width: 21px;\n  height: 21px;\n}\n#bf-orb:hover {\n  box-shadow: 0 8px 26px rgba(251, 114, 153, 0.48);\n}\n#bf-orb:active {\n  transform: scale(0.97);\n}\n\n/* ---------- 设置面板 ---------- */\n#bf-panel {\n  position: fixed;\n  z-index: 2147483001;\n  width: 320px;\n  max-width: calc(100vw - 12px);\n  max-height: 78vh;\n  display: flex;\n  flex-direction: column;\n  background: var(--bf-bg);\n  border: 1px solid var(--bf-border);\n  border-radius: var(--bf-radius);\n  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 200, 220, 0.04);\n  backdrop-filter: blur(16px) saturate(1.15);\n  overflow: hidden;\n  /* 关闭态：visibility + pointer-events 双保险。绝不靠 display 过渡收尾 ——\n     实测 allow-discrete 可能停在 display:flex/opacity:0，面板看不见却继续吞点击。 */\n  visibility: hidden;\n  pointer-events: none;\n  opacity: 0;\n  transform: translateY(-6px) scale(0.985);\n  transition:\n    opacity var(--bf-dur) var(--bf-ease),\n    transform var(--bf-dur) var(--bf-ease),\n    visibility var(--bf-dur) allow-discrete;\n}\n#bf-panel.bf-open {\n  visibility: visible;\n  pointer-events: auto;\n  opacity: 1;\n  transform: none;\n}\n#bf-panel,\n#bf-panel * {\n  box-sizing: border-box;\n}\n.bf-head {\n  height: 44px;\n  flex: 0 0 auto;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 0 8px 0 16px;\n  background: var(--bf-bg2);\n  border-bottom: 1px solid var(--bf-border);\n  cursor: move;\n}\n.bf-title {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  font-size: 13px;\n  font-weight: 600;\n}\n.bf-dot {\n  width: 6px;\n  height: 6px;\n  border-radius: 50%;\n  background: var(--bf-accent);\n  box-shadow: 0 0 8px rgba(251, 114, 153, 0.55);\n}\n.bf-dot.bf-pink {\n  background: var(--bf-pink);\n  box-shadow: 0 0 8px rgba(251, 114, 153, 0.55);\n}\n.bf-hright {\n  display: flex;\n  align-items: center;\n  gap: 4px;\n}\n.bf-ver {\n  font-size: 11px;\n  color: var(--bf-muted);\n  font-variant-numeric: tabular-nums;\n}\n.bf-x {\n  width: 28px;\n  height: 28px;\n  display: grid;\n  place-items: center;\n  border: 0;\n  border-radius: var(--bf-ctl);\n  background: transparent;\n  color: var(--bf-muted);\n  cursor: pointer;\n  font-size: 13px;\n}\n.bf-x:hover {\n  background: var(--bf-s3);\n  color: var(--bf-text);\n}\n.bf-body {\n  padding: 8px 16px 12px;\n  overflow: auto;\n  overscroll-behavior: contain;\n}\n.bf-sec {\n  padding: 12px 0;\n  border-bottom: 1px solid var(--bf-border);\n}\n.bf-sec:last-child {\n  border-bottom: 0;\n}\n.bf-row {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  min-height: 36px;\n  margin: 0;\n  font-size: 13px;\n  cursor: pointer;\n}\n.bf-lab {\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n  min-width: 0;\n}\n.bf-sub {\n  font-size: 11px;\n  color: var(--bf-muted);\n  font-weight: 400;\n}\n.bf-right {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  flex: 0 0 auto;\n}\n.bf-in {\n  height: 32px;\n  width: 108px;\n  padding: 0 10px;\n  color: var(--bf-text);\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  outline: none;\n  font-size: 12px;\n  font-family: inherit;\n  transition: border-color 0.16s var(--bf-ease);\n}\n.bf-in:focus {\n  border-color: var(--bf-accent);\n}\n.bf-in.bf-num {\n  width: 96px;\n  font-variant-numeric: tabular-nums;\n}\n.bf-in.bf-mini {\n  width: 48px;\n  text-align: center;\n}\n/* ---------- 分段按钮（API 查询范围这类二选一） ----------\n   原来用原生 <select>：展开弹层由系统绘制，深色下选中项是系统浅蓝、浅色下白字白底，\n   option:checked / appearance:base-select 全压不住（实测）。自绘弹层又会透出下层控件。\n   只有两个选项本来就不该用下拉 —— 改用分段按钮，没有弹层就没有这些问题。 */\n/* 标签在上、分段按钮占满整行：两个选项并排放在 320px 面板里，跟标签同行必然被裁 */\n.bf-row-sel {\n  flex-direction: column;\n  align-items: stretch;\n  gap: 8px;\n  padding: 8px 0 4px;\n  cursor: default;\n}\n.bf-seg {\n  display: flex;\n  width: 100%;\n  height: 32px;\n  padding: 2px;\n  gap: 2px;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n}\n.bf-seg button {\n  flex: 1 1 0;\n  min-width: 0;\n  height: 100%;\n  padding: 0 8px;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  border: 0;\n  border-radius: 6px;\n  background: transparent;\n  color: var(--bf-muted);\n  font-size: 12px;\n  font-family: inherit;\n  cursor: pointer;\n  white-space: nowrap;\n  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);\n}\n.bf-seg button:hover {\n  color: var(--bf-text);\n  background: var(--bf-s3);\n}\n.bf-seg button[data-on=\"1\"] {\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n  font-weight: 600;\n}\n.bf-seg button[data-on=\"1\"]:hover {\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n}\n\n.bf-color {\n  width: 36px;\n  height: 28px;\n  padding: 2px;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  cursor: pointer;\n}\n.bf-field {\n  padding: 8px 0 4px;\n}\n.bf-ta {\n  width: 100%;\n  min-height: 64px;\n  margin-top: 8px;\n  padding: 8px 10px;\n  resize: vertical;\n  color: var(--bf-text);\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  outline: none;\n  font-size: 12px;\n  line-height: 1.5;\n  font-family: inherit;\n  transition: border-color 0.16s var(--bf-ease);\n}\n.bf-ta:focus {\n  border-color: var(--bf-accent);\n}\n.bf-sw {\n  position: relative;\n  width: 36px;\n  height: 20px;\n  min-width: 36px;\n  cursor: pointer;\n}\n.bf-sw input {\n  position: absolute;\n  opacity: 0;\n  inset: 0;\n  margin: 0;\n  cursor: pointer;\n}\n.bf-track {\n  position: absolute;\n  inset: 0;\n  border-radius: var(--bf-ctl);\n  background: var(--bf-s3);\n  transition: background var(--bf-dur) var(--bf-ease);\n}\n.bf-track::before {\n  content: \"\";\n  position: absolute;\n  width: 16px;\n  height: 16px;\n  left: 2px;\n  top: 2px;\n  border-radius: 50%;\n  background: #fff;\n  transition: transform var(--bf-dur) var(--bf-ease);\n  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);\n}\n.bf-sw input:checked + .bf-track {\n  background: var(--bf-accent);\n}\n.bf-sw input:checked + .bf-track::before {\n  transform: translateX(16px);\n}\n.bf-expand {\n  width: 100%;\n  height: 32px;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 0 4px;\n  border: 0;\n  background: transparent;\n  color: var(--bf-muted);\n  font-size: 12px;\n  cursor: pointer;\n  font-family: inherit;\n}\n.bf-expand:hover {\n  color: var(--bf-text);\n}\n.bf-more {\n  display: none;\n}\n.bf-more.bf-open {\n  display: block;\n}\n.bf-grp {\n  padding: 8px 0 4px;\n  border-top: 1px solid var(--bf-border);\n}\n.bf-gt {\n  font-size: 11px;\n  font-weight: 600;\n  color: var(--bf-accent);\n  margin: 0 0 8px;\n}\n.bf-actions {\n  display: flex;\n  gap: 8px;\n  flex-wrap: wrap;\n  margin-top: 8px;\n}\n.bf-btn {\n  height: 30px;\n  padding: 0 12px;\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  background: var(--bf-s2);\n  color: var(--bf-text);\n  font-size: 12px;\n  cursor: pointer;\n  font-family: inherit;\n  transition: border-color 0.16s var(--bf-ease), background 0.16s var(--bf-ease);\n}\n.bf-btn:hover {\n  border-color: var(--bf-accent);\n}\n.bf-btn.bf-danger:hover {\n  border-color: var(--bf-danger);\n  color: var(--bf-danger);\n}\n.bf-status {\n  flex: 0 0 auto;\n  position: relative;\n  padding: 8px 26px 8px 16px;\n  border-top: 1px solid var(--bf-border);\n  background: var(--bf-bg2);\n  color: var(--bf-muted);\n  font-size: 11px;\n  font-variant-numeric: tabular-nums;\n  white-space: nowrap;\n  overflow: hidden;\n}\n.bf-stext {\n  display: block;\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n/* 右下角缩放手柄：双层折角（外层大括号 + 内层小括号），一眼能认出是可拖拽缩放，\n   不用斜线（斜线在小尺寸下像渲染划痕，Master 2026-11-18 反馈过） */\n.bf-grip {\n  position: absolute;\n  right: 4px;\n  bottom: 4px;\n  width: 15px;\n  height: 15px;\n  cursor: nwse-resize;\n  touch-action: none;\n  color: var(--bf-muted);\n  opacity: 0.85;\n  transition: opacity 0.15s ease, color 0.15s ease;\n}\n.bf-grip::before,\n.bf-grip::after {\n  content: \"\";\n  position: absolute;\n  right: 0;\n  bottom: 0;\n  border-right: 1.5px solid currentColor;\n  border-bottom: 1.5px solid currentColor;\n  border-radius: 0 0 3px 0;\n}\n.bf-grip::before { width: 15px; height: 15px; }\n.bf-grip::after { width: 8px; height: 8px; }\n.bf-grip:hover { opacity: 1; color: var(--bf-accent); }\n\n/* ---------- 记录面板 ---------- */\n#bf-rec {\n  position: fixed;\n  z-index: 2147483001;\n  width: 460px;\n  max-width: calc(100vw - 12px);\n  max-height: 74vh;\n  display: flex;\n  flex-direction: column;\n  background: var(--bf-bg);\n  border: 1px solid var(--bf-border);\n  border-radius: var(--bf-radius);\n  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(255, 200, 220, 0.04);\n  backdrop-filter: blur(16px) saturate(1.15);\n  overflow: hidden;\n  visibility: hidden;\n  pointer-events: none;\n  opacity: 0;\n  transform: translateY(-6px) scale(0.985);\n  transition:\n    opacity var(--bf-dur) var(--bf-ease),\n    transform var(--bf-dur) var(--bf-ease),\n    visibility var(--bf-dur) allow-discrete;\n}\n#bf-rec.bf-open {\n  visibility: visible;\n  pointer-events: auto;\n  opacity: 1;\n  transform: none;\n}\n#bf-rec,\n#bf-rec * {\n  box-sizing: border-box;\n}\n.bf-count {\n  font-size: 11px;\n  color: var(--bf-muted);\n  font-weight: 400;\n}\n.bf-count b {\n  color: var(--bf-text);\n  font-weight: 600;\n}\n.bf-rectool {\n  padding: 12px 14px;\n  border-bottom: 1px solid var(--bf-border);\n  flex: 0 0 auto;\n}\n.bf-filters {\n  display: flex;\n  gap: 8px;\n  margin-bottom: 12px;\n  flex-wrap: wrap;\n}\n.bf-rchip {\n  height: 28px;\n  padding: 0 10px;\n  display: inline-flex;\n  align-items: center;\n  gap: 6px;\n  border-radius: var(--bf-ctl);\n  border: 1px solid var(--bf-border2);\n  background: transparent;\n  color: var(--bf-muted);\n  font-size: 11px;\n  cursor: pointer;\n  user-select: none;\n  font-family: inherit;\n  transition: background 0.16s var(--bf-ease), border-color 0.16s var(--bf-ease), color 0.16s var(--bf-ease);\n}\n.bf-rchip[data-on=\"1\"] {\n  color: var(--bf-text);\n  background: var(--bf-s2);\n  border-color: var(--bf-border);\n}\n.bf-rdot {\n  width: 6px;\n  height: 6px;\n  border-radius: 50%;\n}\n.bf-rd-follow {\n  background: var(--bf-pink);\n}\n.bf-rd-fan {\n  background: var(--bf-fan);\n}\n.bf-rd-custom {\n  background: var(--bf-custom);\n}\n.bf-rd-kw {\n  background: var(--bf-danger);\n}\n.bf-sbar {\n  display: flex;\n  gap: 8px;\n  align-items: center;\n}\n.bf-sf {\n  position: relative;\n  flex: 1;\n  display: flex;\n  align-items: center;\n}\n.bf-sf input {\n  width: 100%;\n  height: 32px;\n  padding: 0 28px 0 10px;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  color: var(--bf-text);\n  outline: none;\n  font-size: 12px;\n  font-family: inherit;\n  transition: border-color 0.16s var(--bf-ease);\n}\n.bf-sf input:focus {\n  border-color: var(--bf-accent);\n}\n.bf-sf.bf-invalid input {\n  border-color: var(--bf-danger);\n}\n.bf-clearq {\n  position: absolute;\n  right: 4px;\n  width: 20px;\n  height: 20px;\n  display: none;\n  place-items: center;\n  border: 0;\n  background: transparent;\n  color: var(--bf-muted);\n  cursor: pointer;\n  border-radius: 6px;\n  font-size: 11px;\n}\n.bf-sf.bf-has .bf-clearq {\n  display: grid;\n}\n.bf-rmode {\n  display: flex;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  overflow: hidden;\n  height: 32px;\n}\n.bf-rmode button {\n  height: 100%;\n  padding: 0 10px;\n  border: 0;\n  background: transparent;\n  color: var(--bf-muted);\n  cursor: pointer;\n  font-size: 11px;\n  font-family: inherit;\n  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);\n}\n.bf-rmode button[data-on=\"1\"] {\n  background: var(--bf-accent);\n  color: var(--bf-accent-ink);\n  font-weight: 600;\n}\n.bf-toolrow {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  margin-top: 8px;\n  gap: 8px;\n}\n.bf-acts {\n  display: flex;\n  gap: 4px;\n}\n.bf-linkbtn {\n  height: 28px;\n  padding: 0 10px;\n  border: 0;\n  background: transparent;\n  color: var(--bf-muted);\n  cursor: pointer;\n  font-size: 11px;\n  border-radius: 6px;\n  font-family: inherit;\n  transition: background 0.16s var(--bf-ease), color 0.16s var(--bf-ease);\n}\n.bf-linkbtn:hover {\n  background: var(--bf-s3);\n  color: var(--bf-text);\n}\n.bf-reclist {\n  flex: 1 1 auto;\n  overflow: auto;\n  overscroll-behavior: contain;\n  padding: 4px 6px 8px;\n}\n.bf-ritem {\n  position: relative;\n  padding: 10px 8px;\n  border-bottom: 1px solid var(--bf-border);\n}\n.bf-ritem:last-child {\n  border-bottom: 0;\n}\n.bf-ritem:hover {\n  background: var(--bf-s2);\n}\n.bf-rmeta {\n  display: flex;\n  align-items: center;\n  gap: 6px;\n  font-size: 11px;\n  color: var(--bf-muted);\n  margin-bottom: 4px;\n}\n.bf-rtime {\n  font-variant-numeric: tabular-nums;\n}\n.bf-rtag {\n  padding: 0 6px;\n  border-radius: 6px;\n  font-size: 11px;\n  font-weight: 500;\n  line-height: 16px;\n}\n.bf-rt-follow {\n  color: var(--bf-pink);\n  background: rgba(251, 114, 153, 0.16);\n}\n.bf-rt-fan {\n  color: var(--bf-fan);\n  background: rgba(255, 209, 102, 0.16);\n}\n.bf-rt-custom {\n  color: #8b93ff;\n  background: rgba(0, 17, 255, 0.22);\n}\n.bf-rt-kw {\n  color: var(--bf-danger);\n  background: rgba(255, 92, 92, 0.16);\n}\n.bf-croomlink {\n  color: var(--bf-accent);\n  text-decoration: none;\n}\n.bf-rline {\n  font-size: 13px;\n  line-height: 1.55;\n  padding-right: 48px;\n}\n.bf-rname {\n  color: var(--bf-fan);\n  font-weight: 600;\n  text-decoration: none;\n}\n#bf-rec[data-bftheme=\"light\"] .bf-rname {\n  color: #9a6306;\n}\n.bf-rroomtitle {\n  font-size: 11px;\n  color: var(--bf-muted);\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.bf-ritem mark {\n  background: rgba(251, 114, 153, 0.28);\n  color: inherit;\n  border-radius: 3px;\n  padding: 0 1px;\n}\n.bf-rcopy,\n.bf-rdel {\n  position: absolute;\n  top: 8px;\n  width: 26px;\n  height: 24px;\n  display: none;\n  place-items: center;\n  border: 0;\n  border-radius: 6px;\n  background: var(--bf-s2);\n  color: var(--bf-muted);\n  cursor: pointer;\n  font-size: 11px;\n}\n.bf-rcopy {\n  right: 4px;\n}\n.bf-rdel {\n  right: 32px;\n}\n.bf-ritem:hover .bf-rcopy,\n.bf-ritem:hover .bf-rdel {\n  display: grid;\n}\n.bf-rdel:hover {\n  color: var(--bf-danger);\n}\n.bf-rchk {\n  position: absolute;\n  left: 8px;\n  top: 50%;\n  transform: translateY(-50%);\n  width: 18px;\n  height: 18px;\n  display: none;\n  align-items: center;\n  justify-content: center;\n  border: 1.5px solid var(--bf-border2);\n  border-radius: 4px;\n  background: transparent;\n  color: transparent;\n  cursor: pointer;\n  font-size: 11px;\n  padding: 0;\n}\n.bf-ritem.bf-rsel {\n  padding-left: 32px;\n}\n.bf-ritem.bf-rsel .bf-rchk {\n  display: flex;\n}\n.bf-rchk.bf-on {\n  background: var(--bf-accent);\n  border-color: var(--bf-accent);\n  color: var(--bf-accent-ink);\n}\n.bf-selbar {\n  display: none;\n  align-items: center;\n  gap: 8px;\n  padding: 6px 10px;\n  margin-top: 8px;\n  border-radius: var(--bf-ctl);\n  background: var(--bf-s2);\n}\n.bf-selbar.bf-show {\n  display: flex;\n}\n.bf-selbar .bf-count {\n  flex: 1;\n}\n.bf-empty {\n  padding: 40px 20px;\n  text-align: center;\n  color: var(--bf-muted);\n  font-size: 12px;\n  line-height: 1.8;\n}\n.bf-empty span {\n  font-size: 11px;\n}\n\n/* ---------- 身份卡 ---------- */\n#bf-card {\n  position: fixed;\n  z-index: 2147483002;\n  width: 280px;\n  display: block;\n  background: var(--bf-bg);\n  border: 1px solid var(--bf-border);\n  border-radius: var(--bf-radius);\n  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 200, 220, 0.05);\n  backdrop-filter: blur(16px) saturate(1.15);\n  overflow: hidden;\n  pointer-events: auto;\n  visibility: hidden;\n  opacity: 0;\n  transform: scale(0.97);\n  transition:\n    opacity 0.2s var(--bf-ease),\n    transform 0.2s var(--bf-ease),\n    visibility 0.2s allow-discrete;\n}\n#bf-card.bf-open {\n  visibility: visible;\n  opacity: 1;\n  transform: none;\n}\n.bf-cbody {\n  padding: 12px 14px 10px;\n  font-size: 12px;\n}\n.bf-chead {\n  display: flex;\n  gap: 10px;\n  align-items: center;\n}\n.bf-cface {\n  width: 44px;\n  height: 44px;\n  border-radius: 50%;\n  object-fit: cover;\n  flex: 0 0 auto;\n  background: var(--bf-s3);\n}\n.bf-cface-ph {\n  background: var(--bf-s3);\n}\n.bf-cwho {\n  min-width: 0;\n  flex: 1;\n}\n.bf-cname {\n  font-size: 13px;\n  font-weight: 600;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.bf-cuid {\n  font-size: 11px;\n  color: var(--bf-muted);\n  font-variant-numeric: tabular-nums;\n  display: flex;\n  align-items: center;\n  gap: 6px;\n}\n.bf-cverify {\n  color: var(--bf-fan);\n  border: 1px solid rgba(255, 209, 102, 0.4);\n  border-radius: 4px;\n  padding: 0 4px;\n  font-size: 11px;\n}\n.bf-cbadge {\n  font-size: 11px;\n  padding: 1px 6px;\n  border-radius: 6px;\n  flex: 0 0 auto;\n}\n.bf-cguard {\n  color: #ff9f43;\n  background: rgba(255, 159, 67, 0.16);\n}\n.bf-csign {\n  margin: 8px 0;\n  font-size: 11px;\n  color: var(--bf-muted);\n  line-height: 1.5;\n  max-height: 34px;\n  overflow: hidden;\n}\n.bf-cstats {\n  border-top: 1px solid var(--bf-border);\n  padding-top: 8px;\n}\n.bf-crow {\n  display: flex;\n  justify-content: space-between;\n  gap: 10px;\n  font-size: 12px;\n  line-height: 1.9;\n}\n.bf-clabel {\n  color: var(--bf-muted);\n}\n.bf-cval {\n  font-variant-numeric: tabular-nums;\n}\n.bf-cmuted {\n  color: var(--bf-muted);\n}\n.bf-cvip {\n  color: var(--bf-pink);\n  font-size: 11px;\n}\n.bf-cfoot {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n  margin-top: 8px;\n  padding-top: 8px;\n  border-top: 1px solid var(--bf-border);\n}\n.bf-cmedal {\n  font-size: 11px;\n}\n.bf-clink {\n  font-size: 12px;\n  color: var(--bf-accent);\n  text-decoration: none;\n}\n.bf-clink:hover {\n  text-decoration: underline;\n}\n\n/* ---------- toast ---------- */\n#bf-toast {\n  position: fixed;\n  left: 50%;\n  bottom: 56px;\n  transform: translateX(-50%) translateY(8px);\n  opacity: 0;\n  z-index: 2147483003;\n  padding: 10px 16px;\n  border-radius: 12px;\n  background: var(--bf-bg2);\n  border: 1px solid var(--bf-border2);\n  color: var(--bf-text);\n  font-size: 12px;\n  pointer-events: none;\n  transition: opacity var(--bf-dur) var(--bf-ease), transform var(--bf-dur) var(--bf-ease);\n  backdrop-filter: blur(12px);\n}\n#bf-toast.bf-show {\n  opacity: 1;\n  transform: translateX(-50%) translateY(0);\n}\n#bf-toast[data-kind=\"enter\"] {\n  border-color: rgba(251, 114, 153, 0.5);\n}\n\n/* 拖拽期间不选字；标题栏本身也不该被选中。\n   ★ v2.5.4：这里原来是一条 `.bf-dragging, .bf-dragging *` 的通配规则，\n     拖动开始/结束各挂一次类。真机实测（B站 直播页 5900+ 节点）：\n       · 挂/摘这一次类 → 强制样式重算 90.9ms（拆掉规则后只要 5.9ms）\n       · 用户感受就是「按下顿一下、松开又顿一下」\n     根因：`*` 展开到每个后代，user-select 又是继承属性，整棵树都要更新 computed style。\n     改法：不再给 <html> 挂通配类。拖动时只写两处 inline（面板自身 user-select、\n     手柄自身 cursor，共 ~1ms），手柄有 pointer capture，光标一定跟手。 */\n.bf-head {\n  user-select: none;\n  -webkit-user-select: none;\n}\n\n/* 滚动条：系统默认的浅色条在玻璃面板上同样割裂 */\n/* ---------- 滚动条 ----------\n   Chromium 156 实测：只要样式里出现 ::-webkit-scrollbar，就退回「传统滚动条」渲染，\n   Windows 会画出上下 ▲▼ 按钮；而 ::-webkit-scrollbar-button{display:none} 在这个版本\n   上不生效（A/B 强制染绿都没出现绿色像素）。标准属性 scrollbar-width/color 走的是现代细条，\n   但没法给 thumb 精确上色/加圆角。\n   结论：**原生滚动条整体隐藏，自己画一根指示条**（.bf-sbthumb），彻底不依赖 OS 渲染。 */\n#bf-panel .bf-body,\n#bf-rec .bf-reclist {\n  scrollbar-width: none;\n  -ms-overflow-style: none;\n}\n#bf-panel .bf-body::-webkit-scrollbar,\n#bf-rec .bf-reclist::-webkit-scrollbar {\n  width: 0;\n  height: 0;\n  display: none;\n}\n.bf-sbthumb {\n  position: absolute;\n  right: 4px;\n  width: 6px;\n  border-radius: 999px;\n  background: rgba(251, 114, 153, 0.55);\n  opacity: 0;\n  pointer-events: none;\n  transition: opacity 0.18s var(--bf-ease);\n  will-change: transform, height;\n}\n.bf-sbthumb.bf-sbthumb-on {\n  opacity: 1;\n}\n.bf-sbthumb.bf-sbthumb-fade {\n  opacity: 0.35;\n}\n#bf-panel[data-bftheme=\"light\"] .bf-sbthumb,\n#bf-rec[data-bftheme=\"light\"] .bf-sbthumb {\n  background: rgba(226, 89, 127, 0.5);\n}\n/* 文本框自己的滚动条也藏掉（内容少时几乎不出现） */\n.bf-ta {\n  scrollbar-width: thin;\n  scrollbar-color: rgba(251, 114, 153, 0.45) transparent;\n}\n\n@media (prefers-reduced-motion: reduce) {\n  #bf-panel,\n  #bf-rec,\n  #bf-card,\n  #bf-toast,\n  #bf-orb,\n  .bf-track,\n  .bf-track::before,\n  .bf-in,\n  .bf-ta,\n  .bf-btn,\n  .bf-rchip,\n  .bf-rmode button,\n  .bf-linkbtn {\n    transition: none !important;\n  }\n}\n\n/* ---------- 自绘下拉 ----------\n   原生 <select> 的展开弹层由浏览器/系统绘制：深色主题下选中项是系统浅蓝、浅色主题下是白底，\n   option:checked 的 background 会被 UA 高亮盖掉（appearance:base-select 也压不住，实测）。\n   所以这一项改成 button + 挂在 body 上的 listbox，颜色全部走主题 token。 */\n.bf-row-sel {\n  align-items: flex-start;\n  padding: 4px 0;\n}\n.bf-dd {\n  position: relative;\n  flex: 0 0 auto;\n  display: inline-block;\n}\n.bf-dd-btn {\n  display: inline-flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 8px;\n  min-width: 136px;\n  height: 32px;\n  padding: 0 10px;\n  background: var(--bf-s2);\n  border: 1px solid var(--bf-border2);\n  border-radius: var(--bf-ctl);\n  color: var(--bf-text);\n  font-size: 12px;\n  font-family: inherit;\n  cursor: pointer;\n  transition: border-color 0.16s var(--bf-ease), background 0.16s var(--bf-ease);\n}\n.bf-dd-btn:hover {\n  background: var(--bf-s3);\n}\n.bf-dd.bf-open .bf-dd-btn,\n.bf-dd-btn:focus-visible {\n  border-color: var(--bf-accent);\n  outline: none;\n}\n.bf-dd-val {\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n}\n.bf-dd-caret {\n  flex: 0 0 auto;\n  color: var(--bf-muted);\n  transition: transform 0.18s var(--bf-ease);\n}\n.bf-dd.bf-open .bf-dd-caret {\n  transform: rotate(180deg);\n}\n/* 菜单挂在 body 上（面板 overflow:hidden 会把它裁掉），所以这里必须自带全部颜色 */\n.bf-dd-menu {\n  position: fixed;\n  z-index: 2147483004;\n  padding: 4px;\n  background: #241a21;\n  border: 1px solid rgba(255, 200, 220, 0.22);\n  border-radius: 10px;\n  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);\n  backdrop-filter: blur(16px) saturate(1.15);\n  display: flex;\n  flex-direction: column;\n  gap: 2px;\n  animation: bf-dd-in 0.16s cubic-bezier(0.22, 0.8, 0.3, 1);\n}\n@keyframes bf-dd-in {\n  from {\n    opacity: 0;\n    transform: translateY(-4px);\n  }\n}\n.bf-dd-menu .bf-dd-opt {\n  display: block;\n  width: 100%;\n  padding: 8px 10px;\n  border: 0;\n  border-radius: 6px;\n  background: transparent;\n  color: #f3ecef;\n  font-size: 12px;\n  font-family: inherit;\n  text-align: left;\n  cursor: pointer;\n  white-space: nowrap;\n}\n.bf-dd-menu .bf-dd-opt:hover {\n  background: rgba(255, 235, 243, 0.12);\n}\n.bf-dd-menu .bf-dd-opt.bf-on {\n  background: #fb7299;\n  color: #2b0d18;\n  font-weight: 600;\n}\nbody.bf-theme-light .bf-dd-menu {\n  background: #ffffff;\n  border-color: rgba(70, 20, 40, 0.18);\n  box-shadow: 0 16px 36px rgba(70, 20, 40, 0.18);\n}\nbody.bf-theme-light .bf-dd-menu .bf-dd-opt {\n  color: #2a1a21;\n}\nbody.bf-theme-light .bf-dd-menu .bf-dd-opt:hover {\n  background: rgba(70, 20, 40, 0.07);\n}\nbody.bf-theme-light .bf-dd-menu .bf-dd-opt.bf-on {\n  background: #e2597f;\n  color: #ffffff;\n}\n@media (prefers-reduced-motion: reduce) {\n  .bf-dd-menu {\n    animation: none;\n  }\n  .bf-dd-caret {\n    transition: none;\n  }\n}\n";
 
 // ===== 55-panel.js =====
 // ===== 面板：悬浮球 + 精简设置面板 + 记录面板 =====
@@ -3127,7 +3326,7 @@ function makeResizable(el, kw, kh) {
     e.stopPropagation();
     st = { x: e.clientX, y: e.clientY, w: el.offsetWidth, h: el.offsetHeight, id: e.pointerId };
     try { grip.setPointerCapture(e.pointerId); } catch (_) {}
-    document.documentElement.classList.add("bf-dragging");
+    setDragVisual(true, grip, el);
   });
   grip.addEventListener("pointermove", (e) => {
     if (!st) return;
@@ -3139,7 +3338,7 @@ function makeResizable(el, kw, kh) {
   grip.addEventListener("pointerup", () => {
     if (!st) return;
     st = null;
-    document.documentElement.classList.remove("bf-dragging");
+    setDragVisual(false, grip, el);
     state.settings[kw] = el.offsetWidth;
     state.settings[kh] = el.offsetHeight;
     saveSettings();
@@ -3147,7 +3346,7 @@ function makeResizable(el, kw, kh) {
   });
   grip.addEventListener("pointercancel", () => {
     st = null;
-    document.documentElement.classList.remove("bf-dragging");
+    setDragVisual(false, grip, el);
   });
 }
 
@@ -3211,6 +3410,24 @@ function syncDragSettings(el, kx, ky) {
   if (isFinite(y)) state.settings[ky] = y;
 }
 
+/** 拖动期间压住选字与光标。
+ *  ★ v2.5.4：原来靠给 <html> 挂 `.bf-dragging` + 通配规则，实测「挂一次类 = 90.9ms 样式重算」
+ *  （5900 节点全树重算），按下和松开各卡一下。改成只写两个 inline：
+ *    · 目标元素自身 user-select:none —— 拖动时鼠标扫过的就是它自己，够用
+ *    · 手柄自身 cursor:grabbing —— 有 pointer capture，光标一直停在手柄上
+ *  实测代价 ~1ms。不动 <html>，也不碰任何后代。 */
+function setDragVisual(on, handle, target) {
+  try {
+    if (on) {
+      if (target) target.style.setProperty("user-select", "none");
+      if (handle) handle.style.setProperty("cursor", "grabbing");
+    } else {
+      if (target) target.style.removeProperty("user-select");
+      if (handle) handle.style.removeProperty("cursor");
+    }
+  } catch (_) {}
+}
+
 function makeDraggable(handle, target, kx, ky, onClick) {
   let drag = null;
   let captured = false;
@@ -3223,9 +3440,8 @@ function makeDraggable(handle, target, kx, ky, onClick) {
     if (hit && hit !== handle) return;
     // 手柄本身是按钮（悬浮球）时不拦默认：没有要选的字，拦了反而影响 click/focus
     const handleIsButton = handle.tagName === "BUTTON";
-    // ★ 拖拽会顺手选中标题栏/面板里的文字（Master 2026-11-18 报）。两道闸：
-    //   ① pointerdown 就 preventDefault，压根不进入「选字」状态；
-    //   ② 真开始拖时给 <html> 挂 bf-dragging，整页 user-select:none，松手摘掉。
+    // ★ 拖拽会顺手选中标题栏/面板里的文字（Master 2026-11-18 报）。pointerdown 就 preventDefault，
+    //   压根不进入「选字」状态（v2.5.4 起不再依赖 <html> 上的通配类）。
     if (!handleIsButton) e.preventDefault();
     // 尺寸与视口只在按下这一刻取一次，之后整段拖动不再触碰布局
     // 起点用元素当前的 style.left/top（绝对定位值），不用 offsetLeft ——
@@ -3251,7 +3467,7 @@ function makeDraggable(handle, target, kx, ky, onClick) {
     const dy = e.clientY - drag.y;
     if (!drag.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
       drag.moved = true;
-      document.documentElement.classList.add("bf-dragging");
+      setDragVisual(true, handle, target);
       try { handle.setPointerCapture(drag.id); captured = true; } catch (_) {}
     }
     if (!drag.moved) return;
@@ -3270,7 +3486,7 @@ function makeDraggable(handle, target, kx, ky, onClick) {
   });
   const endDrag = (e, cancelled) => {
     if (!drag) return;
-    document.documentElement.classList.remove("bf-dragging");
+    setDragVisual(false, handle, target);
     if (captured) {
       try { handle.releasePointerCapture(drag.id); } catch (_) {}
       captured = false;
@@ -3288,8 +3504,8 @@ function makeDraggable(handle, target, kx, ky, onClick) {
   };
   handle.addEventListener("pointerup", (e) => endDrag(e, false));
   handle.addEventListener("pointercancel", () => endDrag(null, true));
-  // 极少数情况下 pointerup 会丢（窗口失焦等）：兜底摘掉拖拽态
-  window.addEventListener("blur", () => document.documentElement.classList.remove("bf-dragging"));
+  // 极少数情况下 pointerup 会丢（窗口失焦等）：兜底恢复光标/选字
+  window.addEventListener("blur", () => setDragVisual(false, handle, target));
 }
 
 // ---------- 行组件 ----------
@@ -3341,6 +3557,17 @@ function rowArea(label, key, placeholder, rows) {
   return (
     '<div class="bf-field"><div class="bf-lab">' + label + "</div>" +
     '<textarea class="bf-ta" data-key="' + key + '" rows="' + (rows || 3) + '" placeholder="' + escapeHtml(placeholder || "") + '"></textarea></div>'
+  );
+}
+
+// 高光效果多选：底牌 / 绕圈 / 涟漪，可以全选也可以全不选（全不选 = 只换色）
+const FX_OPTIONS = [["card", "底牌"], ["orbit", "绕圈光段"], ["ripple", "入场涟漪"]];
+function rowFx(label, sub, key) {
+  return (
+    '<div class="bf-row bf-row-sel"><span class="bf-lab">' + label + (sub ? '<span class="bf-sub">' + sub + "</span>" : "") + "</span>" +
+    '<span class="bf-seg bf-multi" data-key="' + key + '">' +
+    FX_OPTIONS.map((o) => '<button type="button" data-v="' + o[0] + '">' + o[1] + "</button>").join("") +
+    "</span></div>"
   );
 }
 
@@ -3396,6 +3623,12 @@ function buildPanel() {
             rowSwitch("自定义发光", "", "customFollowGlow") +
             rowSwitch("关注发光", "", "followGlow") +
             rowSwitch("粉丝发光", "", "fanGlow") +
+          "</div>" +
+          '<div class="bf-grp"><div class="bf-gt">高光效果（可多选，全不选 = 只换色）</div>' +
+            rowFx("自定义 / 指定人", "最显眼的一档", "customFollowFx") +
+            rowFx("已关注", "", "followFx") +
+            rowFx("粉丝数", "", "fanFx") +
+            rowFx("关键词", "命中面广，加框易满屏", "keywordFx") +
           "</div>" +
           '<div class="bf-grp"><div class="bf-gt">提醒</div>' +
             rowArea("关键词高亮", "keywordRules", "一行一个关键词，可用 关键词:#ff0000 指定颜色；# 开头是注释", 3) +
@@ -3570,6 +3803,15 @@ function bindPanelInputs(panel) {
   });
   panel.addEventListener("click", (e) => {
     const segBtn = e.target && e.target.closest && e.target.closest(".bf-seg button");
+    if (segBtn && segBtn.parentElement.classList.contains("bf-multi")) {
+      // 多选：点一下切换这一项，值存成 "card,orbit" 这种逗号串
+      const seg = segBtn.parentElement;
+      if (segBtn.getAttribute("data-on") === "1") segBtn.removeAttribute("data-on");
+      else segBtn.setAttribute("data-on", "1");
+      const on = [...seg.querySelectorAll("button")].filter((b) => b.getAttribute("data-on") === "1").map((b) => b.getAttribute("data-v"));
+      applySetting(seg.getAttribute("data-key"), on.join(","));
+      return;
+    }
     if (segBtn) {
       const seg = segBtn.parentElement;
       const key = seg.getAttribute("data-key");
@@ -3610,6 +3852,7 @@ const DISPLAY_KEYS = [
   "keywordRules", "keywordColor", "keywordGlow", "watchNames", "watchUids",
   "fanBadge", "fanColor", "fanGlow", "followBadge", "followColor", "followGlow",
   "customFollowBadge", "customFollowColor", "customFollowGlow",
+  "customFollowFx", "followFx", "fanFx", "keywordFx",
 ];
 
 const debouncedLightRefresh = debounce(() => {
@@ -3655,6 +3898,14 @@ function syncPanelValues() {
   panel.querySelectorAll("[data-key]").forEach((el) => {
     const key = el.getAttribute("data-key");
     const v = s[key];
+    if (el.classList && el.classList.contains("bf-multi")) {
+      const on = new Set(parseFx(v));
+      for (const b of el.querySelectorAll("button")) {
+        if (on.has(b.getAttribute("data-v"))) b.setAttribute("data-on", "1");
+        else b.removeAttribute("data-on");
+      }
+      return;
+    }
     if (el.classList && el.classList.contains("bf-seg")) {
       const btns = [...el.querySelectorAll("button")];
       const hit = btns.find((b) => b.getAttribute("data-v") === String(v)) || btns[0];
@@ -3899,7 +4150,8 @@ function dumpDiag() {
     " 风控退避剩余=" + Math.max(0, Math.round((API.riskUntil - Date.now()) / 1000)) + "s 等级=" + API.riskLevel);
   const ms = danmakuMatcher ? danmakuMatcher.stats : {};
   out.push("配对器 到达=" + (ms.arrivals || 0) + " 元素=" + (ms.elements || 0) + " 成功=" + (ms.matched || 0) +
-    " 待等=" + (ms.failed || 0) + " 空壳作废=" + (ms.staleSlot || 0) + " 重复槽=" + (ms.dupSlot || 0));
+    " 待等=" + (ms.failed || 0) + " 空壳作废=" + (ms.staleSlot || 0) + " 重复槽=" + (ms.dupSlot || 0) +
+    " 指纹命中=" + (ms.fpKeyed || 0));
   out.push("绘制 成功=" + st.paintOk + " 无身份=" + st.paintNoId + " 无名=" + st.paintNoName + " 同签名跳过=" + st.paintSame +
     " 隐藏=" + (st.nickHidden || 0) + " 熔断补跑=" + (st.runaway || 0));
   out.push("记录 条数=" + recState.records.length + " 触发=" + st.recCaptured + " 去重挡=" + st.recDedup + " 进场提示=" + st.enter);

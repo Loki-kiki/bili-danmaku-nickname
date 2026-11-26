@@ -10,7 +10,7 @@ const USER_CACHE_KEY = "blfdn_user_cache_v1";
 const HL_KEY = "blfdn_highlights_v1";
 
 // 配置格式版本：读到没有 cfgVer 的老配置走一次性迁移
-const CFG_VER = 3;
+const CFG_VER = 4;
 
 const W = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
 

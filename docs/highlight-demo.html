@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>弹幕高光方案对比小样</title>
+<style>
+.bar{display:flex;flex-wrap:wrap;gap:8px 20px;align-items:center;font-size:13px;color:var(--foreground);margin-bottom:8px}
+.grp{display:flex;gap:4px;align-items:center}
+.grp .l{color:var(--muted-foreground);margin-right:4px}
+.bar button{font:inherit;font-size:12px;padding:4px 10px;border:1px solid var(--border);background:transparent;color:var(--foreground);border-radius:6px;cursor:pointer}
+.bar button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.stat{font-size:12px;color:var(--muted-foreground);font-variant-numeric:tabular-nums;margin-bottom:8px}
+.stat b{color:var(--foreground);font-weight:600}
+.legend{font-size:12px;color:var(--muted-foreground);margin-bottom:12px;line-height:1.6}
+.legend i{font-style:normal}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+@media (max-width:520px){.grid{grid-template-columns:1fr}}
+.cell{border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--card)}
+.cell.big{grid-column:1/-1}
+.cap{display:flex;justify-content:space-between;align-items:baseline;gap:8px;padding:8px 12px;font-size:13px;color:var(--foreground);cursor:pointer;user-select:none}
+.cap b{font-weight:600}
+.cap span{color:var(--muted-foreground);font-size:12px}
+.stage{position:relative;aspect-ratio:16/9;overflow:hidden;background:#000;contain:paint}
+.cell.big .stage{aspect-ratio:16/9}
+
+/* —— 模拟画面 —— */
+.scn{position:absolute;inset:0;opacity:0;transition:opacity 1.2s}
+.scn.on{opacity:1}
+.s-dark{background:radial-gradient(60% 80% at 28% 0%,rgba(110,130,255,.35),transparent 70%),radial-gradient(50% 70% at 78% 0%,rgba(255,110,190,.28),transparent 70%),linear-gradient(#0a0c18,#151022)}
+.s-dark::after{content:"";position:absolute;left:0;right:0;bottom:0;height:26%;background:#05060c}
+.s-bright{background:radial-gradient(30% 45% at 70% 22%,#fff,rgba(255,255,255,0) 70%),linear-gradient(#bcd9f2 0%,#eef5fb 45%,#fbfbf7 62%,#d8cfbd 100%)}
+.s-busy{background:#2a1a3a}
+.s-busy b{position:absolute;display:block;border-radius:4px;animation:drift 7s ease-in-out infinite alternate}
+.s-busy b:nth-child(1){left:6%;top:10%;width:30%;height:42%;background:#e23b3b}
+.s-busy b:nth-child(2){left:40%;top:30%;width:26%;height:55%;background:#ffcf33;animation-duration:5s}
+.s-busy b:nth-child(3){left:66%;top:4%;width:30%;height:34%;background:#ff5fa8;animation-duration:9s}
+.s-busy b:nth-child(4){left:18%;top:60%;width:24%;height:36%;background:#2f80ff;animation-duration:6s}
+.s-busy b:nth-child(5){left:70%;top:54%;width:24%;height:40%;background:#f4f4f4;animation-duration:8s}
+.s-busy b:nth-child(6){left:2%;top:2%;width:22%;height:8%;background:#fff}
+@keyframes drift{to{transform:translate(18px,-14px)}}
+
+/* —— 弹幕层 —— */
+.layer{position:absolute;inset:0;-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 7%);mask-image:linear-gradient(90deg,transparent 0,#000 7%)}
+.dm{position:absolute;left:0;top:0;white-space:nowrap;font:600 18px/24px "Microsoft YaHei","PingFang SC",sans-serif;color:#fff;
+  text-shadow:1px 0 1px #000,-1px 0 1px #000,0 1px 1px #000,0 -1px 1px #000;will-change:transform}
+.nick{position:absolute;right:100%;top:50%;transform:translateY(-50%);margin-right:4px;font-size:11px;line-height:1;opacity:.92;white-space:nowrap}
+.nick i{font-style:normal;margin-right:2px}
+.nick i.md{color:#8a8a99}
+.txt{position:relative;display:inline-block}
+.own .txt{outline:1px solid #fff;outline-offset:1px}
+.hit{color:var(--c)}
+.fx-glow{text-shadow:0 0 3px #000,0 0 9px var(--c)}
+.hl,.orb,.rip{position:absolute;z-index:-1;pointer-events:none;border-radius:6px;box-sizing:border-box}
+.fx-blink .hl{border:2px solid var(--c);animation:blink 1.2s steps(1,end) infinite}
+@keyframes blink{0%{opacity:1}50%{opacity:0}}
+.fx-card .hl{background:color-mix(in srgb,var(--c) 40%,rgba(0,0,0,.62));box-shadow:inset 3px 0 0 var(--c)}
+.orb svg{display:block;overflow:visible}
+.orb rect{fill:none;stroke-dasharray:18 32;animation:orb 1.6s linear infinite}
+.orb .o1{stroke:rgba(0,0,0,.7);stroke-width:5}
+.orb .o2{stroke:var(--c);stroke-width:2.5;stroke-linecap:round}
+@keyframes orb{to{stroke-dashoffset:-100}}
+.rip{border:2px solid var(--c);animation:rip .7s cubic-bezier(.2,.7,.3,1) 2 both}
+@keyframes rip{0%{transform:scale(1);opacity:1}100%{transform:scale(1.22,1.9);opacity:0}}
+.fx-ripple .txt{animation:pop .5s cubic-bezier(.2,.7,.3,1) both}
+@keyframes pop{0%{transform:scale(1.35)}100%{transform:none}}
+.paused *{animation-play-state:paused!important}
+</style>
+</head>
+<body>
+<div class="bar">
+  <div class="grp" data-k="scene"><span class="l">画面</span>
+    <button data-v="cycle" class="on">轮播</button><button data-v="dark">暗场</button><button data-v="bright">亮场</button><button data-v="busy">花哨</button></div>
+  <div class="grp" data-k="density"><span class="l">弹幕量</span>
+    <button data-v="3">普通 3/s</button><button data-v="8" class="on">高 8/s</button><button data-v="16">爆屏 16/s</button></div>
+  <div class="grp" data-k="ratio"><span class="l">高光占比</span>
+    <button data-v="0.04">少 4%</button><button data-v="0.12" class="on">中 12%</button><button data-v="0.3">多 30%</button></div>
+  <div class="grp" data-k="custom"><span class="l">◆颜色</span>
+    <button data-v="#0011ff" class="on">现配置 #0011ff</button><button data-v="#22d3ee">青 #22d3ee</button></div>
+  <div class="grp"><button id="pause">暂停</button><button id="replay">重放</button></div>
+</div>
+<div class="stat" id="stat">同屏 <b>0</b> 条 · 高光 <b>0</b> 条</div>
+<div class="legend">
+  高光档位：<i id="lgC">◆</i> 自定义/指定人　<i style="color:#fb7299">❤</i> 已关注　<i style="color:#ffd166">⭐</i> 粉丝数 ≥5万　<i style="color:#ff5c5c">「名场面」</i> 关键词　·　白色细框 = B站 原生「自己发的弹幕」　·　点卡片标题放大
+</div>
+<div class="grid" id="grid"></div>
+
+<script>
+const MODES = [
+  { id: "now",    title: "现状",     sub: "换色 + 9px 同色光晕" },
+  { id: "blink",  title: "A 闪烁框", sub: "1.2s 一亮一灭（<3Hz）" },
+  { id: "orbit",  title: "B 绕行光段", sub: "两段光沿框转圈" },
+  { id: "card",   title: "C 底牌",   sub: "半透明色块 + 左侧色条" },
+  { id: "ripple", title: "D 入场涟漪", sub: "出场 0.7s×2，之后只剩换色" },
+  { id: "mix",    title: "推荐：分档组合", sub: "关键词/粉丝=现状 · ❤=C+D · ◆=C+D+B" },
+];
+const NAMES = ["砰砰绅士","晚风不打烊","一只小咸鱼","枝江打工人","今天也要早睡","阿梓的猫","路过的鸽子","奶茶三分糖","Sakura_77","狐狸不吃葡萄","听雨眠","momo今天上分了吗","深夜食堂老板","不想上班的周一","超级无敌大可爱","摸鱼专业户","星河长明","雪糕刺客","小号1号","起名困难症患者","一颗柠檬","Rin_0721","夜猫子本猫","吃瓜群众甲"];
+const TEXTS = ["哈哈哈哈哈","？","草","来了来了","好听！","主播晚上好","awsl","这波操作可以","666666","外语歌","下播了吗","笑死","前面的别走","对对对","太强了吧","这谁顶得住","打卡","晚安","???","牛哇牛哇","我来晚了","再来一首","绷不住了","原来是这样","全体起立","好家伙","哈哈哈哈哈哈哈哈哈哈","主播今天状态好好","这个BGM叫什么","？？？？？","8888888"];
+const KW_TEXTS = ["名场面","名场面来了","这是名场面","名场面！！","截图了 名场面"];
+const PAL = ["#fe0302","#ff7204","#ffaa02","#ffd302","#00cd00","#00a2ff","#cc0273"];
+const TIER = { custom: { c: "#0011ff", b: "◆" }, follow: { c: "#fb7299", b: "❤" }, fan: { c: "#ffd166", b: "⭐" }, kw: { c: "#ff5c5c", b: "" } };
+const D = 8000, TRACK_H = 26, FIXED_LIFE = 5000;
+const S = { scene: "cycle", density: 8, ratio: 0.12, custom: "#0011ff" };
+
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+let rng = mulberry32(20261126);
+const pick = (a) => a[Math.floor(rng() * a.length)];
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const tierColor = (t) => (t === "custom" ? S.custom : TIER[t].c);
+
+function fxFor(mode, tier) {
+  if (mode === "now") return ["glow"];
+  if (mode === "mix") return tier === "custom" ? ["card", "ripple", "orbit"] : tier === "follow" ? ["card", "ripple"] : ["glow"];
+  return [mode];
+}
+
+/* —— 面板 —— */
+const grid = document.getElementById("grid");
+const panels = MODES.map((m) => {
+  const cell = document.createElement("div");
+  cell.className = "cell";
+  cell.innerHTML = '<div class="cap"><b>' + m.title + "</b><span>" + m.sub + '</span></div><div class="stage">' +
+    '<div class="scn s-dark"></div><div class="scn s-bright"></div><div class="scn s-busy"><b></b><b></b><b></b><b></b><b></b><b></b></div>' +
+    '<div class="layer"></div></div>';
+  grid.appendChild(cell);
+  cell.querySelector(".cap").onclick = () => cell.classList.toggle("big");
+  return { mode: m.id, cell, stage: cell.querySelector(".stage"), layer: cell.querySelector(".layer"), scns: cell.querySelectorAll(".scn"), items: [] };
+});
+
+/* —— 共享弹幕流：同一条弹幕同时出现在六个面板的同一位置 —— */
+const ctx = document.createElement("canvas").getContext("2d");
+ctx.font = '600 18px "Microsoft YaHei","PingFang SC",sans-serif';
+let tracks = [], topSlots = [], botSlots = [];
+let vt = 0, acc = 0, paused = false, last = performance.now();
+
+function W() { return panels[0].stage.clientWidth || 460; }
+function H() { return panels[0].stage.clientHeight || 216; }
+
+function makeItem() {
+  let tier = null;
+  if (rng() < S.ratio) { const q = rng(); tier = q < 0.15 ? "custom" : q < 0.45 ? "follow" : q < 0.7 ? "fan" : "kw"; }
+  const text = tier === "kw" ? pick(KW_TEXTS) : pick(TEXTS);
+  const color = tier ? null : rng() < 0.85 ? "#fff" : pick(PAL);
+  const own = !tier && rng() < 0.025;
+  const fixed = rng() < 0.08 ? (rng() < 0.5 ? "top" : "bottom") : null;
+  return { tier, text, color, own, fixed, name: pick(NAMES), medal: rng() < 0.35 ? 5 + Math.floor(rng() * 25) : 0, w: ctx.measureText(text).width };
+}
+function withNickW(it) {
+  ctx.font = '11px "Microsoft YaHei","PingFang SC",sans-serif';
+  it.nw = ctx.measureText((it.tier ? "◆" : "") + (it.medal ? it.medal : "") + it.name + ":").width + 8;
+  ctx.font = '600 18px "Microsoft YaHei","PingFang SC",sans-serif';
+  return it;
+}
+
+function allocate(it) {
+  if (it.fixed) {
+    const slots = it.fixed === "top" ? topSlots : botSlots;
+    let i = slots.findIndex((e) => e < vt);
+    if (i < 0) { if (slots.length >= (it.fixed === "top" ? 2 : 1)) return false; i = slots.length; }
+    slots[i] = vt + FIXED_LIFE;
+    it.y = it.fixed === "top" ? 2 + i * TRACK_H : H() - (i + 1) * TRACK_H;
+    return true;
+  }
+  // 和 B站 防挡一样：没有空轨就丢弃这条（不叠字），丢弃数进统计
+  // 最下面一行留给底部固定弹幕，滚动轨道不进去（否则固定弹幕压在滚动字上）
+  const n = Math.max(1, Math.floor((H() - 4) / TRACK_H) - 1), w = W();
+  const need = it.nw + 16; // 新弹幕的昵称挂在左侧，前车尾巴要让出这段
+  for (let i = 0; i < n; i++) {
+    const t = tracks[i];
+    if (!t) { tracks[i] = { t0: vt, w: it.w }; it.y = 2 + i * TRACK_H; return true; }
+    const age = vt - t.t0, vPrev = (w + t.w) / D, vNew = (w + it.w) / D;
+    const tail = w - vPrev * age + t.w;
+    if (tail > w - need) continue;
+    // 新车更快时，确认前车离场前追不上
+    if (vNew > vPrev) {
+      const left = (D - age);
+      if ((vNew - vPrev) * left > (w - need) - tail) continue;
+    }
+    tracks[i] = { t0: vt, w: it.w }; it.y = 2 + i * TRACK_H; return true;
+  }
+  return false;
+}
+
+function build(p, it) {
+  const el = document.createElement("div");
+  el.className = "dm" + (it.own ? " own" : "");
+  const c = it.tier ? tierColor(it.tier) : it.color;
+  el.style.setProperty("--c", c);
+  if (!it.tier && it.color !== "#fff") el.style.color = it.color;
+  let badges = "";
+  if (it.tier && TIER[it.tier].b) badges += '<i style="color:' + tierColor(it.tier) + '">' + TIER[it.tier].b + "</i>";
+  if (it.medal) badges += '<i class="md">' + it.medal + "</i>";
+  el.innerHTML = '<span class="nick">' + badges + esc(it.name) + ':</span><span class="txt">' + esc(it.text) + "</span>";
+  const fx = it.tier ? fxFor(p.mode, it.tier) : [];
+  if (it.tier) el.classList.add("hit");
+  fx.forEach((f) => el.classList.add("fx-" + f));
+  p.layer.appendChild(el);
+  const nick = el.querySelector(".nick");
+  const ew = el.offsetWidth, eh = el.offsetHeight;
+  const pw = p.stage.clientWidth;
+  if (fx.some((f) => f !== "glow")) {
+    const L = nick.offsetWidth + 4 + 6, R = 5, T = 3, bw = L + ew + R, bh = eh + T * 2;
+    const mk = (cls) => { const d = document.createElement("div"); d.className = cls; d.style.cssText = "left:" + -L + "px;top:" + -T + "px;width:" + bw + "px;height:" + bh + "px"; el.insertBefore(d, el.firstChild); return d; };
+    if (fx.includes("card") || fx.includes("blink")) mk("hl");
+    if (fx.includes("orbit")) {
+      const r = 'x="1" y="1" width="' + (bw - 2) + '" height="' + (bh - 2) + '" rx="6" pathLength="100"';
+      mk("orb").innerHTML = '<svg width="' + bw + '" height="' + bh + '"><rect class="o1" ' + r + '/><rect class="o2" ' + r + "/></svg>";
+    }
+    if (fx.includes("ripple")) mk("rip");
+  }
+  const rec = { el, t0: vt, w: ew, y: it.y, fixed: !!it.fixed, hl: !!it.tier };
+  if (rec.fixed) el.style.transform = "translate3d(" + (pw - ew) / 2 + "px," + it.y + "px,0)";
+  else el.style.transform = "translate3d(" + pw + "px," + it.y + "px,0)";
+  p.items.push(rec);
+}
+
+let dropped = 0, born = 0;
+function spawn() { const it = withNickW(makeItem()); born++; if (!allocate(it)) { dropped++; return; } panels.forEach((p) => build(p, it)); }
+
+function tick(p) {
+  const pw = p.stage.clientWidth;
+  p.items = p.items.filter((r) => {
+    const age = vt - r.t0;
+    if (r.fixed) { if (age > FIXED_LIFE) { r.el.remove(); return false; } return true; }
+    const k = age / D;
+    if (k >= 1) { r.el.remove(); return false; }
+    r.el.style.transform = "translate3d(" + (pw - (pw + r.w) * k) + "px," + r.y + "px,0)";
+    return true;
+  });
+}
+
+/* —— 画面轮播 —— */
+const SCN = ["dark", "bright", "busy"];
+let scnIdx = -1;
+function applyScene() {
+  const idx = S.scene === "cycle" ? Math.floor(vt / 9000) % 3 : SCN.indexOf(S.scene);
+  if (idx === scnIdx) return;
+  scnIdx = idx;
+  panels.forEach((p) => p.scns.forEach((s, i) => s.classList.toggle("on", i === idx)));
+}
+
+const statEl = document.getElementById("stat");
+let statAt = 0;
+function frame(now) {
+  const dt = Math.min(64, now - last); last = now;
+  if (!paused) {
+    vt += dt;
+    acc += (dt / 1000) * S.density * (0.4 + rng() * 1.2);
+    while (acc >= 1) { acc -= 1; spawn(); }
+    panels.forEach(tick);
+    applyScene();
+    if (now - statAt > 300) {
+      statAt = now;
+      const its = panels[0].items, hl = its.filter((r) => r.hl).length;
+      statEl.innerHTML = "同屏 <b>" + its.length + "</b> 条 · 高光 <b>" + hl + "</b> 条 · 放不下被丢弃 <b>" + (born ? Math.round(dropped / born * 100) : 0) + "%</b> · 画面：<b>" + ({ dark: "暗场", bright: "亮场", busy: "花哨" })[SCN[scnIdx]] + "</b>";
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+function reset() {
+  rng = mulberry32(20261126);
+  panels.forEach((p) => { p.items.forEach((r) => r.el.remove()); p.items = []; });
+  tracks = []; topSlots = []; botSlots = []; vt = 0; acc = 0; scnIdx = -1; dropped = 0; born = 0;
+}
+
+document.querySelectorAll(".grp[data-k]").forEach((g) => {
+  g.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    g.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    const k = g.dataset.k, v = b.dataset.v;
+    S[k] = k === "density" || k === "ratio" ? Number(v) : v;
+    if (k === "custom") document.getElementById("lgC").style.color = v;
+    if (k === "scene") scnIdx = -1;
+  });
+});
+document.getElementById("lgC").style.color = S.custom;
+document.getElementById("pause").onclick = (e) => {
+  paused = !paused; e.target.textContent = paused ? "继续" : "暂停";
+  grid.classList.toggle("paused", paused);
+};
+document.getElementById("replay").onclick = reset;
+
+applyScene();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

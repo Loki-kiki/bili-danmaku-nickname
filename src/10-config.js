@@ -18,7 +18,7 @@ const DEFAULTS = {
   customFollowMark: false,
   customFollowNames: "",
   customFollowBadge: "◆",
-  customFollowColor: "#0011ff",
+  customFollowColor: "#22d3ee",
   customFollowGlow: true,
   emojiNick: true,
   recordEnabled: true,
@@ -57,6 +57,12 @@ const DEFAULTS = {
   watchEnter: true, // 指定人进直播间提示
   topTalkerMark: false, // 熟面孔排名（默认关）
   topTalkerCount: 10,
+  // —— v2.6 高光效果（每档可多选，逗号分隔：card=底牌 / orbit=绕行光段 / ripple=入场涟漪）——
+  // 分档原则：越贵的效果给越少的人。同屏全是高光 = 没有高光。
+  customFollowFx: "card,orbit,ripple", // 自定义名单 / 指定人：最高档
+  followFx: "card,ripple", // 已关注
+  fanFx: "card", // 粉丝数达标
+  keywordFx: "", // 关键词：保持换色即可（命中面广，加框会满屏）
   cfgVer: CFG_VER,
 };
 
@@ -86,7 +92,8 @@ function migrateSettings(raw) {
 
   // v1→v2：emojiNick 老默认 false（当时实现有 bug，他只好关掉）。
   // 新版表情弹幕昵称是必须项，这里把「仍是老默认 false」的一次性打开；真的想要 false 的人在面板里关掉即可。
-  if (src.emojiNick === false) out.emojiNick = true;
+  // ★ CFG_VER 升到 4 后必须加 from<3 门控，否则 v3 用户主动关掉的 emojiNick 会被重新打开
+  if (from < 3 && src.emojiNick === false) out.emojiNick = true;
 
   // v2→v3：v2.0.0 把粉丝牌/舰长/房管/排名默认打开，真机实测会把弹幕撑宽、同轨互相压字。
   // 这几项改为默认关（详细信息移到悬停身份卡）。只动「还是默认值 true」的，用户主动关过的保持。
@@ -95,6 +102,12 @@ function migrateSettings(raw) {
     out.guardMark = false;
     out.adminMark = false;
     out.topTalkerMark = false;
+  }
+
+  // v3→v4（2.6.0）：◆ 默认色 #0011ff 深蓝在暗底牌上看不清，最高档反而最不显眼，默认改青色。
+  // 只换「仍是旧默认值」的；用户在面板里挑过别的颜色保持不动。
+  if (from < 4 && String(src.customFollowColor || "").toLowerCase() === "#0011ff") {
+    out.customFollowColor = DEFAULTS.customFollowColor;
   }
 
   // 老版「自定义名单」是昵称字符串，v2 仍然兼容（保存时顺带解析 UID），不需要改写文本

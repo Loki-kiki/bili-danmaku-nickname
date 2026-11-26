@@ -58,11 +58,23 @@ function parseDanmakuInfo(msg) {
   // matchText：去掉 [表情] 占位符——画面上它们渲染成图，不计入文字
   const matchText = normalizeText(text.replace(/\[[^\[\]]{1,20}\]/g, ""));
 
+  // ★ v2.5.4 配对指纹：B站 渲染器把 info[0][3]（颜色）与 info[0][2]（字号）原样写进
+  //   DOM 元素的 inline `--color` / `--fontSize`。用它把「同文本不同人」分开 ——
+  //   没有它，一条「？」来自 7 个人时纯 FIFO 必然串人（Master 自己发弹幕时撞见的就是这个）。
+  //   只在两边都读得到时才拦，读不到就退回纯文本，绝不因此漏标。
+  //   尺子必须和 domFingerprint 一致：#rrggbb + 取整 px。
+  const colorInt = Number(info[0] && info[0][3]);
+  const sizeInt = Number(info[0] && info[0][2]);
+  const colorHex = isFinite(colorInt) && colorInt > 0 ? "#" + (colorInt & 0xffffff).toString(16).padStart(6, "0") : "";
+  const sizePx = isFinite(sizeInt) && sizeInt > 0 ? Math.round(sizeInt) + "px" : "";
+  const fp = colorHex || sizePx ? colorHex + "|" + sizePx : "";
+
   return {
     uid,
     name,
     text,
     matchText,
+    fp,
     emoticonKeys,
     medal,
     userLevel,
@@ -151,6 +163,16 @@ function matchKeyword(text, settings) {
   return null;
 }
 
+// ===== 高光效果档位 =====
+const FX_KEY = { custom: "customFollowFx", follow: "followFx", fan: "fanFx", keyword: "keywordFx" };
+const FX_ALL = ["card", "orbit", "ripple"]; // 底牌 / 绕行光段 / 入场涟漪
+
+/** "card, orbit,xx" → ["card","orbit"]：去重、丢未知值、按固定顺序输出（签名稳定） */
+function parseFx(raw) {
+  const set = new Set(String(raw == null ? "" : raw).split(/[\s,，+|]+/).map((x) => x.trim().toLowerCase()));
+  return FX_ALL.filter((f) => set.has(f));
+}
+
 /**
  * 拼昵称前缀（纯函数）：badges 依次为 ◆自定义/指定人 → ❤已关注 → ⭐粉丝数
  * → 粉丝牌 Lv.N → 身份标签 → 熟面孔排名
@@ -233,6 +255,11 @@ function composeNick(identity, meta, settings, ctx) {
     wholeGlow = !!settings.keywordGlow;
   }
 
+  // 高光效果只取「命中的最高一档」，跟颜色的取法一致（自定义 > 关注 > 粉丝 > 关键词）
+  const isFollow = !!(settings.followMark && meta && meta.followed);
+  const tier = isCustom || isWatch ? "custom" : isFollow ? "follow" : fanHit ? "fan" : kw ? "keyword" : "";
+  const fx = tier && wholeColor ? parseFx(settings[FX_KEY[tier]]) : [];
+
   return {
     badges,
     nick,
@@ -241,6 +268,8 @@ function composeNick(identity, meta, settings, ctx) {
     smallSize: Number(settings.nickSmallSize) || 12,
     color: wholeColor,
     glow: wholeGlow,
+    tier,
+    fx,
     flags: { custom: isCustom || isWatch, follow: !!(settings.followMark && meta && meta.followed), fan: fanHit, keyword: !!kw },
   };
 }

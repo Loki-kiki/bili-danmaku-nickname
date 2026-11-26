@@ -67,6 +67,93 @@ function removeOwnSpan(el, st) {
     } catch (_) {}
   }
   if (st) st.span = null;
+  // 高光层跟昵称同生同灭：所有「撤装饰」的路径（回收 / 复用 / 空壳）都走这里
+  removeFx(st);
+}
+
+// ===== 高光效果层（v2.6）=====
+// 一个挂在弹幕元素里的 z-index:-1 层，用 left/right 负内缩把「左侧昵称 + 正文」一起包住，
+// 宽度不用 JS 算：昵称宽度写进 --bf-nw，其余交给 CSS。不占布局宽度 → 不改 B站 的滚动速度。
+//   card   = 半透明档位色底牌 + 左侧色条（常驻，中途看过来也认得出）
+//   orbit  = 两段光沿框绕圈（每帧重绘，同屏限量）
+//   ripple = 出场时向外扩散两圈（只在出现/身份刚查到的那一刻）
+const FX_ORBIT_MAX = 6;
+const fxOrbits = new Set();
+
+function removeFx(st) {
+  if (!st) return;
+  if (st.fx) {
+    try {
+      st.fx.remove();
+    } catch (_) {}
+    fxOrbits.delete(st.fx);
+  }
+  st.fx = null;
+  st.fxKey = "";
+  st.fxW = -1;
+}
+
+function fxNickW(st) {
+  const span = st.span;
+  if (!span) return 0;
+  const html = span.__bfHtml || "";
+  if (!html) return 0;
+  if (!st.nickM || st.nickM.html !== html) {
+    st.nickM = { html, w12: measureNickWidth(html, NICK_FONT_MAX, getComputedStyle(span)) };
+  }
+  return Math.max(NICK_FLOOR_W, Math.min(st.nickM.w12, NICK_CAP_W));
+}
+
+function syncFxGeom(st) {
+  const fx = st.fx;
+  if (!fx) return;
+  const w = fxNickW(st);
+  if (st.fxW !== w) {
+    st.fxW = w;
+    fx.style.setProperty("--bf-nw", w + "px");
+  }
+  const right = st.nickSide === "right";
+  if (fx.classList.contains("bf-fx-r") !== right) fx.classList.toggle("bf-fx-r", right);
+}
+
+function applyFx(el, st, display) {
+  let list = display.color && display.fx ? display.fx.slice() : [];
+  if (!list.length) {
+    removeFx(st);
+    return;
+  }
+  const key = list.join("+") + "|" + display.color;
+  if (st.fx && st.fx.parentNode === el && st.fxKey === key) {
+    syncFxGeom(st);
+    return;
+  }
+  removeFx(st);
+  for (const o of fxOrbits) if (!o.isConnected) fxOrbits.delete(o);
+  // 绕圈每帧重绘：同屏超过上限的降级为「底牌/涟漪」，不让它把页面拖慢，也避免满屏都在转
+  if (list.indexOf("orbit") >= 0 && fxOrbits.size >= FX_ORBIT_MAX) {
+    list = list.filter((f) => f !== "orbit");
+    state.stats.fxOrbitCapped = (state.stats.fxOrbitCapped || 0) + 1;
+  }
+  st.fxKey = key; // 记原始 key：降级过的这条不会每次重画都重试
+  if (!list.length) return;
+  const fx = document.createElement("span");
+  fx.className = "bf-fx " + list.map((f) => "bf-fx-" + f).join(" ");
+  fx.setAttribute("aria-hidden", "true");
+  fx.style.setProperty("--bf-c", display.color);
+  let html = "";
+  if (list.indexOf("ripple") >= 0) html += '<i class="bf-fx-rip"></i>';
+  if (list.indexOf("orbit") >= 0) {
+    html +=
+      '<svg class="bf-fx-orb"><rect class="o1" x="1" y="1" rx="6" pathLength="100"></rect>' +
+      '<rect class="o2" x="1" y="1" rx="6" pathLength="100"></rect></svg>';
+  }
+  fx.innerHTML = html;
+  el.appendChild(fx);
+  st.fx = fx;
+  st.fxW = -1;
+  if (list.indexOf("orbit") >= 0) fxOrbits.add(fx);
+  state.stats.fxPainted = (state.stats.fxPainted || 0) + 1;
+  syncFxGeom(st);
 }
 
 function restoreStyle(el, st) {
@@ -253,6 +340,8 @@ function fitAllNicks() {
         span.style.removeProperty("text-shadow");
       }
     }
+    // 高光层跟着昵称宽度/左右翻转走（值没变就不写 DOM）
+    if (cur.st.fx) syncFxGeom(cur.st);
   }
 }
 
@@ -288,6 +377,7 @@ function renderSpan(display) {
 function signatureOf(display) {
   return (
     display.nick + "|" + display.small + "|" + display.smallSize + "|" + display.color + "|" + display.glow + "|" +
+    (display.fx ? display.fx.join("+") : "") + "|" +
     display.badges.map((b) => b.text + b.color).join(",")
   );
 }
@@ -378,6 +468,7 @@ function paintDisplay(el, st, display, cls) {
   } else if (st.styled) {
     restoreStyle(el, st);
   }
+  applyFx(el, st, display);
   st.sig = signatureOf(display);
   st.ts = Date.now();
 }
@@ -493,7 +584,7 @@ function handleElement(el, fromDefer) {
   }
 
   // ③ 全新元素 → 找配对
-  const slot = { key: cls.key, altKey: cls.altKey, el, seenAt: Date.now(), fixed: isFixedDanmaku(el) };
+  const slot = { key: cls.key, altKey: cls.altKey, el, seenAt: Date.now(), fixed: isFixedDanmaku(el), fp: domFingerprint(el) };
   const hit = danmakuMatcher.onElement(slot);
   if (!hit) {
     debugLog("element-wait", { text: cls.text.slice(0, 20), kind: cls.kind });

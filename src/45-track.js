@@ -85,6 +85,7 @@ function handleDanmakuPacket(msg) {
   const hit = danmakuMatcher.onArrival({
     key: identity.matchText || identity.text,
     altKey: identity.text,
+    fp: identity.fp,
     emojiKeys: identity.emoticonKeys,
     ts: identity.ts,
     identity: identity,
