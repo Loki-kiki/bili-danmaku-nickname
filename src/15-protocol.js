@@ -178,16 +178,52 @@ function updateRoomInfo() {
     }
   } catch (_) {}
 
+  // 已有主播名就不再请求；请求中/刚失败也不重发（recordHighlight 每条命中都会调到这里）
+  if (state.room.uid && state.room.name) return;
+  if (roomInfoInflight || Date.now() - roomInfoLastTry < 30000) return;
   const roomId = getRoomIdFromUrl();
-  if (roomId) {
-    requestJson("https://api.live.bilibili.com/room/v1/Room/get_info?room_id=" + encodeURIComponent(roomId))
-      .then((json) => {
-        if (json && json.code === 0 && json.data && json.data.uid) {
-          applyRoomInfo(json.data.uid, String(json.data.uname || ""), String(json.data.title || ""));
-        }
-      })
-      .catch(() => {});
-  }
+  if (!roomId) return;
+  roomInfoInflight = true;
+  roomInfoLastTry = Date.now();
+  // ★ get_info 只给 uid/title，不给 uname（2026-11 实测）→ 主播名另用 Master/info 按 uid 取
+  requestJson("https://api.live.bilibili.com/room/v1/Room/get_info?room_id=" + encodeURIComponent(roomId))
+    .then((json) => {
+      if (json && json.code === 0 && json.data && json.data.uid) {
+        applyRoomInfo(json.data.uid, String(json.data.uname || ""), String(json.data.title || ""));
+      }
+      if (state.room.uid && !state.room.name) {
+        return fetchUpName(state.room.uid).then((name) => {
+          if (name) applyRoomInfo(state.room.uid, name, "");
+        });
+      }
+    })
+    .catch(() => {})
+    .then(() => {
+      roomInfoInflight = false;
+    });
+}
+
+let roomInfoInflight = false;
+let roomInfoLastTry = 0;
+const upNameCache = new Map(); // uid → Promise<string>
+
+/** 按 UP 主 uid 取昵称（Master/info，免签名免登录）；失败返回 ""，失败结果不缓存 */
+function fetchUpName(uid) {
+  const key = String(uid || "");
+  if (!key || key === "0") return Promise.resolve("");
+  if (upNameCache.has(key)) return upNameCache.get(key);
+  const p = requestJson("https://api.live.bilibili.com/live_user/v1/Master/info?uid=" + encodeURIComponent(key))
+    .then((json) => {
+      const name = (json && json.code === 0 && json.data && json.data.info && json.data.info.uname) || "";
+      if (!name) upNameCache.delete(key);
+      return String(name);
+    })
+    .catch(() => {
+      upNameCache.delete(key);
+      return "";
+    });
+  upNameCache.set(key, p);
+  return p;
 }
 
 // ===== 自家 WS 客户端（不劫持页面，独立连接）=====

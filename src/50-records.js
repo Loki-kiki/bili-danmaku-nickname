@@ -169,6 +169,37 @@ function renderRecords() {
   }
   body.innerHTML = html.join("");
   updateSelBar();
+  recBackfillRoomNames();
+}
+
+/** 旧记录/抢跑记录只存了 roomUid 没存主播名 → 按 uid 补名、落盘、重绘（每个 uid 只请求一次） */
+let recBackfilling = false;
+function recBackfillRoomNames() {
+  if (recBackfilling) return;
+  const uids = [...new Set(recState.records.filter((h) => h.roomUid && !h.roomName).map((h) => String(h.roomUid)))];
+  if (!uids.length) return;
+  recBackfilling = true;
+  Promise.all(uids.map((uid) => fetchUpName(uid).then((name) => [uid, name])))
+    .then((pairs) => {
+      let changed = 0;
+      for (const [uid, name] of pairs) {
+        if (!name) continue;
+        for (const h of recState.records) {
+          if (String(h.roomUid) === uid && !h.roomName) {
+            h.roomName = name;
+            changed += 1;
+          }
+        }
+      }
+      recBackfilling = false;
+      if (changed) {
+        recSaveSoon();
+        renderRecords();
+      }
+    })
+    .catch(() => {
+      recBackfilling = false;
+    });
 }
 
 function updateSelBar() {
