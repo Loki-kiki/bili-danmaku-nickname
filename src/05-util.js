@@ -77,6 +77,19 @@ function domFingerprint(el) {
   }
 }
 
+/** v2.6.2 回收痕迹：class 旧值里没有任何「活动态」标记（-roll / -show / -center / -dm-fixed）
+ *  → 这次 class 变更之前元素躺在池子里，现在被拿出来渲染下一条了。
+ *  实测（2026-11-27 545068 房间，生命周期探针）：飘完时 class 收成光秃秃的 `bili-danmaku-x-dm`，
+ *  复用时先整段换子节点（child +1/-1），再 `-dm` → `-dm -roll` → `-dm -roll -show`；
+ *  回收和复用常落在同一批 MutationRecord 里，回调时元素看上去一直是活的，只有 oldValue 留得下这一笔。
+ *  （更早版本 destroy 写成 bili-danmaku-x-<id>，同样没有活动标记，一并覆盖。）
+ *  整词匹配：-dm-vip / -dm-rotate 不算活动标记。null/空串（新建元素）不算。 */
+const LIVE_CLASS_RE = /(^|\s)bili-danmaku-x-(roll|show|center|dm-fixed)(\s|$)/;
+function isPooledClass(old) {
+  if (typeof old !== "string" || !old) return false;
+  return !LIVE_CLASS_RE.test(old);
+}
+
 // 把 "123456" 或 "#aabbcc" 或 "aabbcc" 统一成 #rrggbb；非法返回空串
 function normalizeColor(v, fallback) {
   const s = String(v || "").trim();

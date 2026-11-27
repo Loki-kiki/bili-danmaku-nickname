@@ -530,7 +530,9 @@ function handleElement(el, fromDefer) {
 
   // ★ 先清理、再判定：元素已离开活动池（B站 回收），我们的装饰必须跟着撤掉。
   if (!isDanmakuElement(el)) {
-    cleanupDecor(el, elState.get(el));
+    const old = elState.get(el);
+    if (old) state.stats.recycled = (state.stats.recycled || 0) + 1; // 飘完回池时撤装饰（实测这是主路径）
+    cleanupDecor(el, old);
     return;
   }
 
@@ -538,7 +540,12 @@ function handleElement(el, fromDefer) {
   const cur = normalizeText(ownText(el, st));
 
   // ① 元素被复用：内容变了 → 清干净当新元素处理
-  if (st && st.uid && cur && cur !== st.orig) {
+  //   ★ v2.6.2 第二道闸：纯表情正文是空串、同款表情 <img> 一模一样，「文字变了」永远判不出复用；
+  //   同文本不同人也一样。B站 render 会重写 --color/--fontSize，指纹变了就一定换了一条弹幕。
+  //   （第一道闸是 70-main.js 里按 class 旧值撤装饰；这道兜住同帧合并等漏网情况）
+  const fpNow = st && st.fp ? domFingerprint(el) : "";
+  const fpChanged = !!(st && st.fp && fpNow && fpNow !== st.fp);
+  if (st && st.uid && ((cur && cur !== st.orig) || fpChanged)) {
     trace("reuse:" + st.uid + " cur=" + cur.slice(0, 16) + " orig=" + String(st.orig || "").slice(0, 16) + " span=" + !!(st.span && st.span.parentNode === el));
     removeOwnSpan(el, st);
     restoreStyle(el, st);
@@ -623,6 +630,7 @@ function paintElement(el, identityOrArrival, cls) {
   st.uid = String(identity.uid);
   st.orig = cls.text || st.orig;
   st.identity = identity;
+  st.fp = domFingerprint(el); // 复用判定用（见 handleElement ①）
   if (!st.origWidth && !st.span) st.origWidth = el.offsetWidth || el.scrollWidth || 0;
   paintDisplay(el, st, display, cls);
   state.stats.matched += 1;

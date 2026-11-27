@@ -33,7 +33,7 @@ function loadLogic(files) {
     files.map((f) => fs.readFileSync(path.join(SRC, f), "utf8")).join("\n;\n") +
     "\n;globalThis.__t = { createMatcher, migrateSettings, composeNick, parseDanmakuInfo," +
     " normalizeText, emoticonFileKey, customNameSet, watchNameSet, watchUidSet, matchKeyword," +
-    " formatCount, DEFAULTS, state, domFingerprint, pairKey, parseFx," +
+    " formatCount, DEFAULTS, state, domFingerprint, pairKey, parseFx, isPooledClass," +
     " setSettings: (s) => { state.settings = s; } };";
 
   const sandbox = {
@@ -507,6 +507,33 @@ test("撤装饰时效果层跟着撤（removeOwnSpan 里调 removeFx）", () => 
   const src = fs.readFileSync(path.join(SRC, "35-decorate.js"), "utf8");
   const body = src.slice(src.indexOf("function removeOwnSpan"), src.indexOf("// ===== 高光效果层"));
   assert.ok(body.indexOf("removeFx(st)") > 0, "回收/复用时会留下残框");
+});
+
+console.log("\n[13] 池子复用串人（v2.6.2：同款表情被挂上上一位的昵称）");
+test("回收痕迹：destroy() 写的 bili-danmaku-x-<id> 算回收，活动态 / 空值不算", () => {
+  assert.strictEqual(lib.isPooledClass("bili-danmaku-x-default"), true, "destroy 后的类名必须认成回收");
+  assert.strictEqual(lib.isPooledClass("bili-danmaku-x-12"), true);
+  assert.strictEqual(lib.isPooledClass("bili-danmaku-x-dm bili-danmaku-x-roll bili-danmaku-x-show"), false);
+  assert.strictEqual(lib.isPooledClass("bili-danmaku-x-dm bili-danmaku-x-center bili-danmaku-x-high-top"), false);
+  assert.strictEqual(lib.isPooledClass("bili-danmaku-x-dm"), true, "实测：飘完收成光秃秃的 -dm，从它变出去就是复用");
+  assert.strictEqual(lib.isPooledClass("bili-danmaku-x-dm bili-danmaku-x-roll"), false, "-roll 已在，是活动态");
+  assert.strictEqual(lib.isPooledClass("bili-danmaku-x-dm bili-danmaku-x-center bili-danmaku-x-high-top"), false);
+  assert.strictEqual(lib.isPooledClass(null), false, "新建元素 oldValue=null 不算回收");
+  assert.strictEqual(lib.isPooledClass(""), false);
+});
+test("回收痕迹用整词匹配：-dm-vip 不能当成 -dm", () => {
+  assert.strictEqual(lib.isPooledClass("bili-danmaku-x-dm-vip"), true);
+});
+test("装配层：observer 必须开 attributeOldValue，且先整批撤回收元素的装饰", () => {
+  const src = fs.readFileSync(path.join(SRC, "70-main.js"), "utf8");
+  assert.ok(/attributeOldValue:\s*true/.test(src), "没有 class 旧值就判不出池子复用");
+  const body = src.slice(src.indexOf("function onMutations"));
+  assert.ok(body.indexOf("isPooledClass(m.oldValue)") > 0 && body.indexOf("isPooledClass(m.oldValue)") < body.indexOf("handleElement"), "回收撤装饰必须排在任何 handleElement 之前");
+});
+test("装饰层：指纹变了也算复用（纯表情正文为空，靠文字判不出）", () => {
+  const src = fs.readFileSync(path.join(SRC, "35-decorate.js"), "utf8");
+  assert.ok(src.includes("fpChanged"), "handleElement 缺指纹复用判定");
+  assert.ok(src.includes("st.fp = domFingerprint(el)"), "paintElement 没记下画上时的指纹");
 });
 
 console.log("\n结果：" + passed + " 通过 / " + failed + " 失败");

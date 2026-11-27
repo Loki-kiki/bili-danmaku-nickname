@@ -1,6 +1,6 @@
 {
   "name": "bili-danmaku-nickname",
-  "version": "2.6.1",
+  "version": "2.6.2",
   "private": true,
   "description": "B站直播画面弹幕昵称标注 · 油猴脚本",
   "scripts": {

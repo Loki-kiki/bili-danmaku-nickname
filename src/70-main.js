@@ -24,13 +24,33 @@ function scanNode(node) {
   } catch (_) {}
 }
 
+// ★ v2.6.2 回收判定：B站 飘完把元素 class 收成光秃秃的 "bili-danmaku-x-dm" 丢回池子，
+//   下一条弹幕再拿出来：换子节点 → "-dm -roll" → "-dm -roll -show"（2026-11-27 生命周期探针实测）。
+//   回收和下一次 render 常在同一批记录里，回调触发时元素看上去「一直是活的」，
+//   而纯表情的正文是空串、同一个表情的 <img> 也一模一样 —— 旧的「文字变了才算复用」永远判不出来，
+//   于是上一位发同款表情的人（ILA）的身份快照被原样补画到 Master 的新弹幕上。
+//   唯一可靠的痕迹在 MutationRecord.oldValue：某次 class 变更的旧值里没有活动标记（-roll/-show/-center），说明它刚从池子里出来。
+//   isPooledClass 放在 05-util.js（逻辑层，可单测）。
+
 function onMutations(mutations) {
   if (mutations.length) trace("mut:" + mutations.length + ":" + mutations[0].type);
+  // 先整批扫一遍回收痕迹：同一批里排在前面的记录会先把旧身份补画回去，必须在处理任何记录之前撤掉
+  for (const m of mutations) {
+    if (m.type !== "attributes" || !m.target || m.target.nodeType !== 1) continue;
+    if (!isPooledClass(m.oldValue)) continue;
+    const st = elState.get(m.target);
+    if (!st) continue;
+    trace("recycle:" + st.uid);
+    cleanupDecor(m.target, st);
+    state.stats.recycled = (state.stats.recycled || 0) + 1;
+  }
   for (const m of mutations) {
     try {
       // ① 属性变化：B站在插入后才补 -roll/-show 类名（也用于池子回收复用）
+      //    带着我们装饰的元素离开活动池时也要进 handleElement，否则昵称会挂在池里的空壳上
       if (m.type === "attributes") {
-        if (m.target.nodeType === 1 && isDanmakuElement(m.target)) handleElement(m.target);
+        const t = m.target;
+        if (t.nodeType === 1 && (isDanmakuElement(t) || elState.has(t))) handleElement(t);
         continue;
       }
       // ② 文字变化：文本节点是后加进去的（插入瞬间 textContent 还是空的），
@@ -67,6 +87,7 @@ function attachObserver() {
     characterData: true,
     attributes: true,
     attributeFilter: ["class"],
+    attributeOldValue: true, // ★ v2.6.2 回收判定靠 class 旧值（见 isPooledClass）
   });
   state.stats.selector = container ? "danmaku-item-container" : "body(fallback)";
   log("observer attached", state.stats.selector);
@@ -139,7 +160,7 @@ function dumpDiag() {
     " 待等=" + (ms.failed || 0) + " 空壳作废=" + (ms.staleSlot || 0) + " 重复槽=" + (ms.dupSlot || 0) +
     " 指纹命中=" + (ms.fpKeyed || 0));
   out.push("绘制 成功=" + st.paintOk + " 无身份=" + st.paintNoId + " 无名=" + st.paintNoName + " 同签名跳过=" + st.paintSame +
-    " 隐藏=" + (st.nickHidden || 0) + " 熔断补跑=" + (st.runaway || 0));
+    " 隐藏=" + (st.nickHidden || 0) + " 熔断补跑=" + (st.runaway || 0) + " 回收撤装饰=" + (st.recycled || 0));
   out.push("记录 条数=" + recState.records.length + " 触发=" + st.recCaptured + " 去重挡=" + st.recDedup + " 进场提示=" + st.enter);
   out.push("UP uid=" + state.room.uid + " name=\"" + (state.room.name || "(空)") + "\" title=\"" + (state.room.title || "(空)") + "\"");
 
